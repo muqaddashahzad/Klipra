@@ -1,6 +1,6 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
-    X, Loader2, Plus, Trash2, MoveHorizontal,
+    X, Loader2, Plus, Trash2, MoveHorizontal, MousePointerClick, PlayCircle,
     Play, Pause, SkipBack, SkipForward, Volume2, VolumeX,
 } from 'lucide-react';
 import { getApiUrl } from '../config';
@@ -43,6 +43,19 @@ export default function ReframeKeyframeModal({
     const [saving, setSaving] = useState(false);
     const [error, setError] = useState(null);
     const [showAdvanced, setShowAdvanced] = useState(false);
+    // Mouse-click mode on the preview window:
+    //   "keyframe" (default) — clicks drop a focus keyframe and NEVER play/pause.
+    //   "playback"           — clicks play / pause and NEVER drop a keyframe.
+    // Persisted in localStorage so it remembers per-user.
+    const [clickMode, setClickMode] = useState(() => {
+        try {
+            const v = localStorage.getItem('klipra_reframe_click_mode');
+            return v === 'playback' ? 'playback' : 'keyframe';
+        } catch (_) { return 'keyframe'; }
+    });
+    useEffect(() => {
+        try { localStorage.setItem('klipra_reframe_click_mode', clickMode); } catch (_) {}
+    }, [clickMode]);
 
     // 9:16 box dimensions, in fractions of the source frame.
     const cropAspect = 9 / 16;
@@ -117,8 +130,17 @@ export default function ReframeKeyframeModal({
     }, [currentTime, clipDuration, seekTo]);
 
     function handleFrameClick(e) {
-        // Don't add a keyframe if the user clicked one of the inline
-        // controls (play overlay, etc.) — stopPropagation on those.
+        // In Playback mode, a frame-click only toggles play/pause —
+        // never a keyframe. This is the "video-player" mouse mode.
+        if (clickMode === 'playback') {
+            playPause();
+            return;
+        }
+        // In Keyframe mode (default), a frame-click DROPS a focus
+        // keyframe and does NOT touch playback state. So the video
+        // keeps playing (or stays paused) while the user clicks.
+        // Controls with stopPropagation (transport row, etc.) won't
+        // reach here.
         const rect = frameRef.current?.getBoundingClientRect();
         if (!rect) return;
         const x = (e.clientX - rect.left) / rect.width;
@@ -212,36 +234,77 @@ export default function ReframeKeyframeModal({
                 onClick={(e) => e.stopPropagation()}
             >
                 {/* Frosted-glass sticky header */}
-                <div className="sticky top-0 z-20 flex items-center justify-between px-5 py-3.5 border-b border-white/10 bg-zinc-900/85 backdrop-blur-xl">
-                    <div className="flex items-center gap-2.5">
+                <div className="sticky top-0 z-20 flex items-center justify-between gap-3 px-5 py-3.5 border-b border-white/10 bg-zinc-900/85 backdrop-blur-xl">
+                    <div className="flex items-center gap-2.5 min-w-0">
                         <span className="inline-flex h-8 w-8 items-center justify-center rounded-xl bg-gradient-to-br from-indigo-500/30 to-cyan-500/20 ring-1 ring-cyan-400/30 shadow-[0_0_18px_-4px_rgba(34,211,238,0.6)]">
                             <MoveHorizontal size={14} className="text-cyan-200" />
                         </span>
-                        <div>
+                        <div className="min-w-0">
                             <h3 className="bg-gradient-to-r from-white to-zinc-400 bg-clip-text text-transparent text-[13px] tracking-tight font-semibold">
                                 Reframe — focus cuts
                             </h3>
-                            <p className="text-[11px] text-zinc-500 mt-0.5">
-                                Listen to the clip, then click anywhere on the frame to drop a focus point.
+                            <p className="text-[11px] text-zinc-500 mt-0.5 truncate">
+                                {clickMode === 'keyframe'
+                                    ? 'Click anywhere on the frame to drop a focus keyframe. Playback unaffected.'
+                                    : 'Click anywhere on the frame to play / pause. Keyframes off.'}
                             </p>
                         </div>
                     </div>
-                    <button
-                        onClick={onClose}
-                        disabled={saving}
-                        className="rounded-lg p-1.5 text-zinc-400 hover:text-white hover:bg-white/5 transition disabled:opacity-50"
-                        title="Close"
-                    >
-                        <X size={16} />
-                    </button>
+                    <div className="flex items-center gap-2 shrink-0">
+                        {/* Mouse-mode segmented control */}
+                        <div
+                            className="inline-flex rounded-xl p-0.5 ring-1 ring-white/10 bg-zinc-900/60 backdrop-blur-md"
+                            role="tablist"
+                            aria-label="Click mode"
+                            onClick={(e) => e.stopPropagation()}
+                        >
+                            <button
+                                onClick={() => setClickMode('keyframe')}
+                                title="Clicks place focus keyframes (default)"
+                                className={
+                                    'inline-flex items-center gap-1.5 rounded-lg px-2.5 py-1 text-[11px] font-medium transition ' +
+                                    (clickMode === 'keyframe'
+                                        ? 'bg-gradient-to-r from-cyan-500/30 to-indigo-500/25 text-cyan-100 ring-1 ring-cyan-300/40 shadow-[0_0_18px_-6px_rgba(34,211,238,0.55)]'
+                                        : 'text-zinc-400 hover:text-white hover:bg-white/5')
+                                }
+                            >
+                                <MousePointerClick size={12} />
+                                <span>Keyframe</span>
+                            </button>
+                            <button
+                                onClick={() => setClickMode('playback')}
+                                title="Clicks play / pause the video"
+                                className={
+                                    'inline-flex items-center gap-1.5 rounded-lg px-2.5 py-1 text-[11px] font-medium transition ' +
+                                    (clickMode === 'playback'
+                                        ? 'bg-gradient-to-r from-emerald-500/30 to-teal-500/25 text-emerald-100 ring-1 ring-emerald-300/40 shadow-[0_0_18px_-6px_rgba(16,185,129,0.55)]'
+                                        : 'text-zinc-400 hover:text-white hover:bg-white/5')
+                                }
+                            >
+                                <PlayCircle size={12} />
+                                <span>Playback</span>
+                            </button>
+                        </div>
+                        <button
+                            onClick={onClose}
+                            disabled={saving}
+                            className="rounded-lg p-1.5 text-zinc-400 hover:text-white hover:bg-white/5 transition disabled:opacity-50"
+                            title="Close"
+                        >
+                            <X size={16} />
+                        </button>
+                    </div>
                 </div>
 
                 <div className="space-y-4 p-5">
-                    {/* SOURCE VIDEO + CLICK-TO-KEYFRAME AREA */}
+                    {/* SOURCE VIDEO + CLICK-TO-KEYFRAME / CLICK-TO-PLAY AREA */}
                     <div
                         ref={frameRef}
                         onClick={handleFrameClick}
-                        className="relative aspect-video bg-black rounded-2xl overflow-hidden cursor-crosshair select-none ring-1 ring-white/10 shadow-2xl shadow-black/40 group"
+                        className={
+                            'relative aspect-video bg-black rounded-2xl overflow-hidden select-none ring-1 ring-white/10 shadow-2xl shadow-black/40 group ' +
+                            (clickMode === 'keyframe' ? 'cursor-crosshair' : 'cursor-pointer')
+                        }
                     >
                         {sourceUrl ? (
                             <video
@@ -298,9 +361,10 @@ export default function ReframeKeyframeModal({
                             />
                         ))}
 
-                        {/* Center play/pause overlay — shown when paused.
-                            stopPropagation so it doesn't add a keyframe. */}
-                        {!playing && sourceUrl && (
+                        {/* Center play overlay — only in Playback mode so it
+                            doesn't intercept the frame-click in Keyframe mode.
+                            In Keyframe mode, use the transport row to play. */}
+                        {!playing && sourceUrl && clickMode === 'playback' && (
                             <button
                                 onClick={(e) => { e.stopPropagation(); playPause(); }}
                                 className="absolute inset-0 flex items-center justify-center bg-gradient-to-b from-black/10 via-black/0 to-black/30 hover:from-black/20 hover:to-black/40 transition"
@@ -310,6 +374,25 @@ export default function ReframeKeyframeModal({
                                     <Play size={24} fill="currentColor" className="ml-0.5" />
                                 </span>
                             </button>
+                        )}
+
+                        {/* Small mode badge top-left, so the user always
+                            knows what clicks will do. */}
+                        {sourceUrl && (
+                            <div className="pointer-events-none absolute top-2.5 left-2.5 z-10 inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[10px] font-medium ring-1 backdrop-blur-md shadow-md
+                                bg-black/55 ring-white/15 text-zinc-100">
+                                {clickMode === 'keyframe' ? (
+                                    <>
+                                        <MousePointerClick size={10} />
+                                        <span>Click = keyframe</span>
+                                    </>
+                                ) : (
+                                    <>
+                                        <PlayCircle size={10} />
+                                        <span>Click = play / pause</span>
+                                    </>
+                                )}
+                            </div>
                         )}
                     </div>
 

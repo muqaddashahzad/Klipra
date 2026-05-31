@@ -1,5 +1,5 @@
 import React, { useEffect, useRef, useState } from 'react';
-import { X, Plus, Trash2, MoveHorizontal } from 'lucide-react';
+import { X, Plus, Trash2, MoveHorizontal, MousePointerClick, PlayCircle } from 'lucide-react';
 
 /**
  * Keyframed-pan reframe editor for the *standalone* subtitle burn flow.
@@ -49,6 +49,25 @@ export default function StandaloneReframeKeyframeModal({
     );
     const [currentTime, setCurrentTime] = useState(0);
     const [showAdvanced, setShowAdvanced] = useState(false);
+    // Mouse-click mode (shared preference with per-clip reframe modal).
+    //   "keyframe" (default) — clicks drop focus keyframes, no play/pause.
+    //   "playback"           — clicks play / pause, no keyframes.
+    const [clickMode, setClickMode] = useState(() => {
+        try {
+            const v = localStorage.getItem('klipra_reframe_click_mode');
+            return v === 'playback' ? 'playback' : 'keyframe';
+        } catch (_) { return 'keyframe'; }
+    });
+    useEffect(() => {
+        try { localStorage.setItem('klipra_reframe_click_mode', clickMode); } catch (_) {}
+    }, [clickMode]);
+
+    function togglePlayPause() {
+        const v = videoRef.current;
+        if (!v) return;
+        if (v.paused) v.play().catch(() => {});
+        else v.pause();
+    }
 
     // Crop overlay box dimensions, in fractions of the source frame.
     // We pick the largest target-aspect rectangle that fits inside the
@@ -83,6 +102,14 @@ export default function StandaloneReframeKeyframeModal({
     }
 
     function handleFrameClick(e) {
+        // Playback mode — frame-click toggles play / pause, never adds
+        // a keyframe.
+        if (clickMode === 'playback') {
+            togglePlayPause();
+            return;
+        }
+        // Keyframe mode (default) — frame-click drops a focus keyframe
+        // and does NOT touch playback state.
         const rect = frameRef.current?.getBoundingClientRect();
         if (!rect) return;
         // Frame click coords -> 0..1 fractions. The video uses
@@ -215,26 +242,65 @@ export default function StandaloneReframeKeyframeModal({
                     <X size={20} />
                 </button>
 
-                <div className="flex items-center gap-3 mb-4">
-                    <div className="w-10 h-10 rounded-xl bg-gradient-to-br from-indigo-500 to-cyan-500 flex items-center justify-center">
-                        <MoveHorizontal size={20} className="text-white" />
+                <div className="flex items-start justify-between gap-3 mb-4">
+                    <div className="flex items-center gap-3 min-w-0">
+                        <div className="w-10 h-10 rounded-xl bg-gradient-to-br from-indigo-500 to-cyan-500 flex items-center justify-center shrink-0">
+                            <MoveHorizontal size={20} className="text-white" />
+                        </div>
+                        <div className="min-w-0">
+                            <h3 className="text-lg font-bold text-white">
+                                Reframe — focus cuts
+                            </h3>
+                            <p className="text-xs text-zinc-500">
+                                {clickMode === 'keyframe'
+                                    ? 'Click anywhere on the frame to drop a focus keyframe. Playback unaffected.'
+                                    : 'Click anywhere on the frame to play / pause. Keyframes off.'}
+                            </p>
+                        </div>
                     </div>
-                    <div>
-                        <h3 className="text-lg font-bold text-white">
-                            Reframe — focus cuts
-                        </h3>
-                        <p className="text-xs text-zinc-500">
-                            Click anywhere on the frame to drop a hard cut at this moment.
-                            The crop window will snap to that focus point until the next cut.
-                        </p>
+                    {/* Mouse-mode segmented control */}
+                    <div
+                        className="inline-flex rounded-xl p-0.5 ring-1 ring-white/10 bg-zinc-900/60 backdrop-blur-md shrink-0"
+                        role="tablist"
+                        aria-label="Click mode"
+                    >
+                        <button
+                            onClick={() => setClickMode('keyframe')}
+                            title="Clicks place focus keyframes (default)"
+                            className={
+                                'inline-flex items-center gap-1.5 rounded-lg px-2.5 py-1 text-[11px] font-medium transition ' +
+                                (clickMode === 'keyframe'
+                                    ? 'bg-gradient-to-r from-cyan-500/30 to-indigo-500/25 text-cyan-100 ring-1 ring-cyan-300/40 shadow-[0_0_18px_-6px_rgba(34,211,238,0.55)]'
+                                    : 'text-zinc-400 hover:text-white hover:bg-white/5')
+                            }
+                        >
+                            <MousePointerClick size={12} />
+                            <span>Keyframe</span>
+                        </button>
+                        <button
+                            onClick={() => setClickMode('playback')}
+                            title="Clicks play / pause the video"
+                            className={
+                                'inline-flex items-center gap-1.5 rounded-lg px-2.5 py-1 text-[11px] font-medium transition ' +
+                                (clickMode === 'playback'
+                                    ? 'bg-gradient-to-r from-emerald-500/30 to-teal-500/25 text-emerald-100 ring-1 ring-emerald-300/40 shadow-[0_0_18px_-6px_rgba(16,185,129,0.55)]'
+                                    : 'text-zinc-400 hover:text-white hover:bg-white/5')
+                            }
+                        >
+                            <PlayCircle size={12} />
+                            <span>Playback</span>
+                        </button>
                     </div>
                 </div>
 
-                {/* Source video viewer with click-to-keyframe */}
+                {/* Source video viewer with click-to-keyframe / click-to-play */}
                 <div
                     ref={frameRef}
                     onClick={handleFrameClick}
-                    className="relative w-full bg-black rounded-lg overflow-hidden cursor-crosshair select-none mb-3"
+                    className={
+                        'relative w-full bg-black rounded-lg overflow-hidden select-none mb-3 ' +
+                        (clickMode === 'keyframe' ? 'cursor-crosshair' : 'cursor-pointer')
+                    }
                     style={{ aspectRatio: `${sourceAspect}` }}
                 >
                     {videoUrl ? (
