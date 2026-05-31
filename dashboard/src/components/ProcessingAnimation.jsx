@@ -1,7 +1,7 @@
 import React, { useEffect, useState, useRef } from 'react';
 import { Scan, Scissors, Activity, Radio, CheckCircle, Play } from 'lucide-react';
 
-const ProcessingAnimation = ({ media, isComplete, syncedTime, isSyncedPlaying, syncTrigger }) => {
+const ProcessingAnimation = ({ media, isComplete, syncedTime, isSyncedPlaying, syncTrigger, llmConfig }) => {
   const [videoSrc, setVideoSrc] = useState(null);
   const [isYouTube, setIsYouTube] = useState(false);
   const videoRef = useRef(null);
@@ -12,6 +12,15 @@ const ProcessingAnimation = ({ media, isComplete, syncedTime, isSyncedPlaying, s
 
     if (media.type === 'file') {
       const url = URL.createObjectURL(media.payload);
+      setVideoSrc(url);
+      return () => URL.revokeObjectURL(url);
+    } else if (media.type === 'local' && media.previewBlob) {
+      // LOCAL-FILE mode: bytes are NOT uploaded — but the browser
+      // already has the File object in memory from the drop/pick.
+      // Use that for the in-progress preview so the user sees their
+      // video playing while Whisper churns through it on the
+      // backend, exactly like the upload path does.
+      const url = URL.createObjectURL(media.previewBlob);
       setVideoSrc(url);
       return () => URL.revokeObjectURL(url);
     } else if (media.type === 'url') {
@@ -196,7 +205,7 @@ const ProcessingAnimation = ({ media, isComplete, syncedTime, isSyncedPlaying, s
       
       {!isSyncedPlaying && !isComplete && (
           <div className="absolute top-4 right-4 z-30 flex items-center gap-2 px-3 py-1.5 bg-black/60 backdrop-blur-md rounded-lg border border-white/10 text-white/50 text-[10px] font-mono">
-            AI_MODEL: GEMINI-2.5-PRO
+            AI_MODEL: {resolveActiveModel(llmConfig).toUpperCase()}
           </div>
       )}
       
@@ -240,5 +249,21 @@ const ProcessingAnimation = ({ media, isComplete, syncedTime, isSyncedPlaying, s
     </div>
   );
 };
+
+// Resolve which model label to display. Reads the SAME source the
+// request builder reads from (localStorage `os_llm_pref_last`) so what
+// you see here is what gets sent. Falls back to the prop only when
+// localStorage isn't populated yet (first-time use).
+function resolveActiveModel(llmConfig) {
+    try {
+        const raw = localStorage.getItem('os_llm_pref_last');
+        if (raw) {
+            const pref = JSON.parse(raw);
+            if (pref?.model) return pref.model;
+        }
+    } catch { /* ignore */ }
+    if (llmConfig?.model) return llmConfig.model;
+    return 'gemini-2.5-flash';
+}
 
 export default ProcessingAnimation;

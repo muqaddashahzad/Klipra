@@ -70,3 +70,33 @@
     top: 100%;
   }
 }
+
+/* ────────────────────────────────────────────────────────────────────
+   Global fullscreen fix.
+
+   When ANY <video> element on Klipra enters native fullscreen mode,
+   show the entire frame (letterboxed if necessary) rather than
+   center-cropping to fill the screen. Without this rule, vertical
+   9:16 clips played in cards styled with `object-cover` lose roughly
+   the top 30% and bottom 30% when the user clicks the fullscreen
+   button — only the middle band is visible.
+
+   This is intentionally targeted at :fullscreen so it does NOT affect
+   thumbnails, gallery cards, or inline previews where object-cover is
+   the right look. The pseudo-class needs the vendor-prefixed variants
+   for older Safari/Firefox.
+
+   Background is forced black so letterbox bars match the native
+   player chrome instead of showing through to whatever was behind.
+   ──────────────────────────────────────────────────────────────────── */
+:fullscreen video,
+:-webkit-full-screen video,
+:-moz-full-screen video,
+video:fullscreen,
+video:-webkit-full-screen,
+video:-moz-full-screen {
+  object-fit: contain !important;
+  width: 100% !important;
+  height: 100% !important;
+  background: #000 !important;
+}

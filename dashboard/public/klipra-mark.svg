@@ -1,0 +1,17 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" fill="none">
+  <defs>
+    <linearGradient id="kg" x1="0" y1="0" x2="64" y2="64" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#0EA5A4" />
+      <stop offset="0.5" stop-color="#06B6D4" />
+      <stop offset="1" stop-color="#22D3EE" />
+    </linearGradient>
+  </defs>
+  <!-- Soft rounded backdrop -->
+  <rect x="2" y="2" width="60" height="60" rx="14" fill="#0B0F14" stroke="url(#kg)" stroke-width="2" />
+  <!-- Stylized K: vertical bar + two diagonals (a "cut mark" pair) -->
+  <path d="M19 14 L19 50" stroke="url(#kg)" stroke-width="5" stroke-linecap="round" />
+  <path d="M19 32 L45 14" stroke="url(#kg)" stroke-width="5" stroke-linecap="round" />
+  <path d="M19 32 L45 50" stroke="url(#kg)" stroke-width="5" stroke-linecap="round" />
+  <!-- Tiny play-triangle notch where the diagonals meet (signals "video") -->
+  <path d="M22.5 28 L22.5 36 L29 32 Z" fill="#22D3EE" opacity="0.85" />
+</svg>

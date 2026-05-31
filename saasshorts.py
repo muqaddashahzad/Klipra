@@ -404,9 +404,16 @@ Use natural casual American English like a real person on TikTok. Contractions, 
 Examples of English UGC hooks: "Okay so I just found this tool and...", "Stop doing this manually, there's a better way", "I can't believe nobody told me about this sooner..."
 """
 
+    try:
+        from prompt_rules import USER_TEXT_RULES
+    except ImportError:
+        USER_TEXT_RULES = ""
+
     prompt = f"""You are a viral short-form video scriptwriter for TikTok/Instagram Reels.
 Generate {num_scripts} video scripts to promote this product/business.
 {lang_instructions}
+{USER_TEXT_RULES}
+
 PRODUCT ANALYSIS:
 {json.dumps(analysis, indent=2)}
 

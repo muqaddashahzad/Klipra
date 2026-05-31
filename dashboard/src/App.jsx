@@ -1,9 +1,22 @@
 import React, { useState, useEffect } from 'react';
-import { Upload, FileVideo, Sparkles, Youtube, Instagram, Share2, LogOut, ChevronDown, Check, Activity, LayoutDashboard, Settings, PlusCircle, History, Menu, X, Terminal, Shield, LayoutGrid, Image, Globe, RotateCcw, Calendar } from 'lucide-react';
+import { Upload, FileVideo, Sparkles, Youtube, Instagram, Share2, LogOut, ChevronDown, Check, Activity, LayoutDashboard, Settings, PlusCircle, History, Menu, X, Terminal, Shield, LayoutGrid, Image, Globe, RotateCcw, Calendar, Trash2, Tag, Info, Type, Languages, Brain, Film } from 'lucide-react';
 import KeyInput from './components/KeyInput';
+import ProviderPicker from './components/ProviderPicker';
 import MediaInput from './components/MediaInput';
 import ResultCard from './components/ResultCard';
+import PastProjects from './components/PastProjects';
+import Pricing from './components/Pricing';
+import About from './components/About';
+import StandaloneDub from './components/StandaloneDub';
+import StandaloneSubtitle from './components/StandaloneSubtitle';
+import SmartClipper from './components/SmartClipper';
+import HorizontalToVertical from './components/HorizontalToVertical';
+import KlipraLogo from './components/KlipraLogo';
 import ProcessingAnimation from './components/ProcessingAnimation';
+import AuthModal from './components/AuthModal';
+import InfluencerApplyModal from './components/InfluencerApplyModal';
+import Home from './components/Home';
+import { installSinglePlayerCoordinator, pauseAllVideos } from './lib/playerRegistry';
 // import Gallery from './components/Gallery';
 import ThumbnailStudio from './components/ThumbnailStudio';
 import SaaShortsTab from './components/SaaShortsTab';
@@ -134,7 +147,25 @@ const pollJob = async (jobId) => {
 };
 
 function App() {
-  const [apiKey, setApiKey] = useState(localStorage.getItem('gemini_key') || '');
+  // LLM provider config (set by KeyInput). The legacy `apiKey` local
+  // ergonomically maps to `llmConfig.api_key` so the dozens of existing
+  // usages don't need rewiring.
+  const [llmConfig, setLlmConfig] = useState({
+    provider: 'gemini',
+    model: 'gemini-2.5-flash',
+    api_key: localStorage.getItem('gemini_key') || '',
+  });
+  // Backwards-compatible alias used everywhere else in this component.
+  const apiKey = llmConfig.api_key;
+  // Setter that accepts EITHER a plain string (legacy) or a config object
+  // from the new picker.
+  const setApiKey = (next) => {
+    if (typeof next === 'string') {
+      setLlmConfig((c) => ({ ...c, api_key: next }));
+    } else if (next && typeof next === 'object') {
+      setLlmConfig((c) => ({ ...c, ...next }));
+    }
+  };
   // Social API State - Load encrypted or plain
   const [uploadPostKey, setUploadPostKey] = useState(() => {
     const stored = localStorage.getItem('uploadPostKey_v3');
@@ -164,10 +195,137 @@ function App() {
   const [logs, setLogs] = useState([]);
   const [logsVisible, setLogsVisible] = useState(true);
   const [processingMedia, setProcessingMedia] = useState(null);
-  const [activeTab, setActiveTab] = useState('dashboard'); // dashboard, settings
+  // Default landing tab inside the app is now 'home' — the in-app
+  // homepage with feature explainers + demos pulled from past projects.
+  // Clicking a product tab (Generate Viral Clips / Subtitle / Dub) or
+  // resuming an active job will set this to whichever workspace they
+  // need.
+  const [activeTab, setActiveTab] = useState('home');
 
   const [sessionRecovered, setSessionRecovered] = useState(false);
   const [showScheduleWeek, setShowScheduleWeek] = useState(false);
+
+  // True when the currently-open job was loaded from the Past Projects
+  // panel (vs. freshly generated this session). Lets the split-view
+  // header surface a "Back to past projects" button so users always
+  // have a one-click route back to the list.
+  const [openedFromPast, setOpenedFromPast] = useState(false);
+
+  // Bump-key per product. When the user clicks the SAME product tab
+  // they're already on (or clicks the logo while on a product), we
+  // increment the counter for that tab. Each product page has a
+  // useEffect that watches its bump key and resets internal state to
+  // its idle/home view when the key changes — so re-clicking the
+  // header always returns the user to "Add a video" instead of
+  // leaving them stranded inside a past project. The counter approach
+  // is preferred over remounting (via key prop) because it preserves
+  // children's component identity for things that aren't supposed to
+  // reset (e.g. sticky LLM provider selection).
+  const [tabHomeBump, setTabHomeBump] = useState({
+    dashboard: 0,
+    subtitle: 0,
+    dub: 0,
+  });
+  const goHomeOfTab = (id) => {
+    setActiveTab(id);
+    setTabHomeBump((prev) => ({ ...prev, [id]: (prev[id] || 0) + 1 }));
+    // Clip-generator state lives in App, so we reset it here directly.
+    if (id === 'dashboard') {
+      setStatus('idle');
+      setJobId(null);
+      setResults(null);
+      setLogs([]);
+      setProcessingMedia(null);
+      setOpenedFromPast(false);
+    }
+  };
+
+  // ---- Auth state ----
+  // currentUser is null while loading and after sign-out. Token persists
+  // across reloads via localStorage so refreshing the page doesn't sign
+  // the user back out.
+  const [currentUser, setCurrentUser] = useState(null);
+  const [authToken, setAuthToken] = useState(() => {
+    try { return localStorage.getItem('klipra_auth_token') || null; } catch { return null; }
+  });
+  const [authModalTab, setAuthModalTab] = useState(null); // null | 'signin' | 'signup'
+  const [showInfluencer, setShowInfluencer] = useState(false);
+  const [userMenuOpen, setUserMenuOpen] = useState(false);
+
+  // OAuth redirect handler. The backend bounces the browser back to
+  // the SPA with the new session token in the URL fragment
+  // (#oauth_token=…) — fragments aren't sent to the server, so the
+  // token never lands in access logs. Pluck it out, persist it, clear
+  // the hash. Errors get surfaced via #oauth_error= the same way.
+  useEffect(() => {
+    const hash = window.location.hash || '';
+    const consume = (key) => {
+      const m = hash.match(new RegExp(`[#&]${key}=([^&]+)`));
+      return m ? decodeURIComponent(m[1]) : null;
+    };
+    const oauthToken = consume('oauth_token');
+    const oauthErr = consume('oauth_error');
+    if (oauthToken) {
+      try { localStorage.setItem('klipra_auth_token', oauthToken); } catch {}
+      setAuthToken(oauthToken);
+      window.history.replaceState(null, '', window.location.pathname + window.location.search);
+    } else if (oauthErr) {
+      const friendly = {
+        not_configured: "That sign-in option isn't configured yet.",
+        invalid_state:  'Sign-in expired or was tampered with. Please try again.',
+        no_email:       "We couldn't get an email from that account. Make sure your primary email is verified and not hidden.",
+        access_denied:  'Sign-in was cancelled.',
+      }[oauthErr] || `Sign-in failed: ${oauthErr}`;
+      // Use a tiny delay so the alert isn't blocked by browsers that
+      // dislike alerts during the load handler.
+      setTimeout(() => alert(friendly), 50);
+      window.history.replaceState(null, '', window.location.pathname + window.location.search);
+    }
+  }, []);
+
+  // Restore current user from token on mount.
+  useEffect(() => {
+    if (!authToken) { setCurrentUser(null); return; }
+    let cancelled = false;
+    (async () => {
+      try {
+        const r = await fetch(getApiUrl('/api/auth/me'), {
+          headers: { Authorization: `Bearer ${authToken}` },
+        });
+        if (!r.ok) throw new Error('Unauthorized');
+        const data = await r.json();
+        if (!cancelled) setCurrentUser(data.user);
+      } catch {
+        if (!cancelled) {
+          // Token expired or DB cleared — clear it.
+          try { localStorage.removeItem('klipra_auth_token'); } catch {}
+          setAuthToken(null);
+          setCurrentUser(null);
+        }
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [authToken]);
+
+  const handleAuthSuccess = ({ user, token }) => {
+    try { localStorage.setItem('klipra_auth_token', token); } catch {}
+    setAuthToken(token);
+    setCurrentUser(user);
+    setAuthModalTab(null);
+  };
+
+  const signOut = async () => {
+    try {
+      await fetch(getApiUrl('/api/auth/signout'), {
+        method: 'POST',
+        headers: authToken ? { Authorization: `Bearer ${authToken}` } : {},
+      });
+    } catch { /* swallow */ }
+    try { localStorage.removeItem('klipra_auth_token'); } catch {}
+    setAuthToken(null);
+    setCurrentUser(null);
+    setUserMenuOpen(false);
+  };
 
   // Sync state for original video playback
   const [syncedTime, setSyncedTime] = useState(0);
@@ -183,6 +341,85 @@ function App() {
   const handleClipPause = () => {
     setIsSyncedPlaying(false);
   };
+
+  // Single-active-player coordinator. Installed once at boot — listens
+  // globally for <video> 'play' events and pauses any other video that's
+  // currently playing. Stops the "two clips playing at once" bug when
+  // a modal preview opens while a result-grid clip is mid-play.
+  useEffect(() => { installSinglePlayerCoordinator(); }, []);
+
+  // Global fullscreen fix.
+  //
+  // Even though index.css has `:fullscreen video { object-fit: contain }`,
+  // browsers (especially Safari and Chrome on macOS) sometimes ignore
+  // CSS during native HTML5 video fullscreen — the `<video controls>`
+  // element enters its own presentation mode that doesn't apply our
+  // stylesheet. The user saw this: vertical 9:16 clips fullscreened
+  // from result cards came out cropped to the middle band.
+  //
+  // This JS handler is the bulletproof fallback. On any
+  // fullscreenchange event we:
+  //   1. Find the actually-fullscreen element.
+  //   2. If it's a <video>, force `object-fit: contain` inline (beats
+  //      every Tailwind class, every stylesheet rule, every native
+  //      override). Same for any <video> descendant if a container
+  //      went fullscreen instead.
+  //   3. Save the original `style.objectFit` value so we can restore
+  //      it when fullscreen exits — preserves the card's `object-cover`
+  //      look for the inline preview.
+  useEffect(() => {
+    const tracked = new WeakMap(); // video → previous inline style.objectFit
+    const apply = () => {
+      const fs =
+        document.fullscreenElement
+        || document.webkitFullscreenElement
+        || document.mozFullScreenElement
+        || document.msFullscreenElement;
+      // Collect <video> elements affected by the fullscreen state.
+      const videos = new Set();
+      if (fs) {
+        if (fs.tagName === 'VIDEO') {
+          videos.add(fs);
+        } else {
+          fs.querySelectorAll('video').forEach(v => videos.add(v));
+        }
+        videos.forEach(v => {
+          if (!tracked.has(v)) {
+            tracked.set(v, v.style.objectFit || '');
+          }
+          v.style.objectFit = 'contain';
+          v.style.background = '#000';
+        });
+      } else {
+        // Restore — fullscreen just exited. Walk every tracked video
+        // and put back whatever was there originally (usually empty
+        // string, which lets the className's object-cover take over
+        // again for the inline card view).
+        document.querySelectorAll('video').forEach(v => {
+          if (tracked.has(v)) {
+            v.style.objectFit = tracked.get(v);
+            v.style.background = '';
+            tracked.delete(v);
+          }
+        });
+      }
+    };
+    document.addEventListener('fullscreenchange', apply);
+    document.addEventListener('webkitfullscreenchange', apply);
+    document.addEventListener('mozfullscreenchange', apply);
+    document.addEventListener('MSFullscreenChange', apply);
+    return () => {
+      document.removeEventListener('fullscreenchange', apply);
+      document.removeEventListener('webkitfullscreenchange', apply);
+      document.removeEventListener('mozfullscreenchange', apply);
+      document.removeEventListener('MSFullscreenChange', apply);
+    };
+  }, []);
+
+  // When the user navigates between tabs, pause everything. Without this,
+  // a clip playing on the dashboard keeps playing in the background after
+  // they switch to Past Projects / Pricing / About.
+  useEffect(() => { pauseAllVideos(); }, [activeTab]);
 
   // Session Recovery: Restore on mount
   useEffect(() => {
@@ -230,11 +467,15 @@ function App() {
     }
   }, [jobId, status, results, activeTab]);
 
+  // Mirror the current key to the legacy `gemini_key` slot ONLY when the
+  // active provider is Gemini. KeyInput stores per-provider keys under
+  // its own `os_llm_key_*` namespace; this line keeps backward-compat
+  // for any code still reading the old key directly.
   useEffect(() => {
-    // Encrypt Gemini Key too for consistency if desired, but user asked specifically about Social integration not saving well.
-    // For now keeping gemini plain for compatibility unless requested.
-    if (apiKey) localStorage.setItem('gemini_key', apiKey);
-  }, [apiKey]);
+    if (apiKey && llmConfig.provider === 'gemini') {
+      localStorage.setItem('gemini_key', apiKey);
+    }
+  }, [apiKey, llmConfig.provider]);
 
   useEffect(() => {
     if (uploadPostKey) {
@@ -321,7 +562,34 @@ function App() {
   };
 
   const handleProcess = async (data) => {
-    if (!apiKey) {
+    // Read the live provider from localStorage FIRST so users on Ollama
+    // (which needs no API key) aren't bounced to the "Gemini API Key
+    // Required" modal. The old code only looked at `apiKey` (the Gemini
+    // key slot) and showed the modal for any empty key — including the
+    // perfectly-valid "Ollama, no key needed" case.
+    let _gateProvider = 'gemini';
+    let _gateKey = apiKey || '';
+    try {
+      const prefRaw = localStorage.getItem('os_llm_pref_last');
+      if (prefRaw) {
+        const pref = JSON.parse(prefRaw);
+        if (pref?.provider) _gateProvider = pref.provider;
+      }
+      const keyRaw = localStorage.getItem(`os_llm_key_${_gateProvider}`);
+      if (keyRaw) {
+        // XOR-decode (matches ProviderPicker.xorEncode)
+        const SALT = 'openshorts-llm-v1';
+        const decoded = atob(keyRaw);
+        let out = '';
+        for (let i = 0; i < decoded.length; i++) {
+          out += String.fromCharCode(decoded.charCodeAt(i) ^ SALT.charCodeAt(i % SALT.length));
+        }
+        if (out) _gateKey = out;
+      }
+    } catch (_) { /* localStorage may be unavailable in some browsers */ }
+    // Ollama (local) needs no key — let it through. Every other provider
+    // still requires a key before we even start uploading.
+    if (_gateProvider !== 'ollama' && !_gateKey) {
       setShowKeyModal(true);
       return;
     }
@@ -332,20 +600,90 @@ function App() {
 
     try {
       let body;
-      const headers = { 'X-Gemini-Key': apiKey };
+
+      // CRITICAL: read provider/model/key from localStorage at request
+      // time, not from React state. The KeyInput component writes there
+      // synchronously when the user clicks a tile or types — but the
+      // setLlmConfig path (state) can lag by one render. Reading from
+      // localStorage eliminates that whole class of "GEMINI was sent
+      // even though I picked MiniMax" bugs.
+      let liveProvider = llmConfig.provider || 'gemini';
+      let liveModel = llmConfig.model || 'gemini-2.5-flash';
+      let liveKey = apiKey || '';
+      try {
+        const prefRaw = localStorage.getItem('os_llm_pref_last');
+        if (prefRaw) {
+          const pref = JSON.parse(prefRaw);
+          if (pref?.provider) liveProvider = pref.provider;
+          if (pref?.model) liveModel = pref.model;
+        }
+        // Per-provider key — KeyInput stores XOR-encoded
+        const keyRaw = localStorage.getItem(`os_llm_key_${liveProvider}`);
+        if (keyRaw) {
+          // XOR-decode (matches KeyInput's xorEncode)
+          const SALT = 'openshorts-llm-v1';
+          const decoded = atob(keyRaw);
+          let out = '';
+          for (let i = 0; i < decoded.length; i++) {
+            out += String.fromCharCode(decoded.charCodeAt(i) ^ SALT.charCodeAt(i % SALT.length));
+          }
+          if (out) liveKey = out;
+        }
+      } catch (e) {
+        console.warn('Could not read provider config from localStorage', e);
+      }
+      console.log('[Submit] Using provider:', liveProvider, '/', liveModel,
+                  '/ key:', liveKey ? `${liveKey.slice(0, 8)}…` : '<none>');
+
+      const opts = data.options || {};
+      const headers = {
+        'X-LLM-Provider': liveProvider,
+        'X-LLM-Model': liveModel,
+        'X-LLM-Key': liveKey,
+        // Legacy header — only meaningful when the user is on Gemini.
+        'X-Gemini-Key': liveProvider === 'gemini' ? liveKey : '',
+        'X-Min-Clips': String(opts.minClips ?? 3),
+        'X-Max-Clips': String(opts.maxClips ?? 8),
+        'X-Min-Duration': String(opts.minDur ?? 20),
+        'X-Max-Duration': String(opts.maxDur ?? 60),
+        // Transcription tuning. Whisper model is now always
+        // large-v3-turbo on the backend (no UI tier picker), so we only
+        // pass language hint + script-script preference.
+        'X-Transcript-Lang': String(opts.transcriptLang || ''),
+        'X-Transcript-Script': String(opts.transcriptScript || 'auto'),
+        // Stage-1 engine choice. Header value 'whisper' or 'elevenlabs'.
+        'X-Transcribe-Provider': String(opts.transcribeProvider || 'whisper'),
+        // Forward the ElevenLabs key so backend can use it for Scribe
+        // when the user picked the elevenlabs engine. Same key the dub
+        // feature uses — stored in Settings.
+        ...(elevenLabsKey ? { 'X-ElevenLabs-Key': elevenLabsKey } : {}),
+      };
 
       if (data.type === 'url') {
         headers['Content-Type'] = 'application/json';
         body = JSON.stringify({ url: data.payload });
+      } else if (data.type === 'local') {
+        // LOCAL-FILE PATH — no upload, just hand the absolute path to
+        // the backend as a multipart form field. Backend validates it
+        // against KLIPRA_LOCAL_MEDIA_ROOTS before doing anything with
+        // it. We use multipart (not JSON) so the same endpoint shape
+        // works as the file-upload path.
+        const formData = new FormData();
+        formData.append('local_path', data.payload);
+        body = formData;
       } else {
         const formData = new FormData();
         formData.append('file', data.payload);
         body = formData;
       }
 
+      // For uploads we strip Content-Type so the browser sets the multipart
+      // boundary, but we keep the LLM headers.
+      const uploadHeaders = { ...headers };
+      delete uploadHeaders['Content-Type'];
       const res = await fetch(getApiUrl('/api/process'), {
         method: 'POST',
-        headers: data.type === 'url' ? headers : { 'X-Gemini-Key': apiKey },
+        headers: data.type === 'url' ? headers : uploadHeaders,
         body
       });
 
@@ -365,142 +703,271 @@ function App() {
     setResults(null);
     setLogs([]);
     setProcessingMedia(null);
+    setOpenedFromPast(false);
     localStorage.removeItem(SESSION_KEY);
   };
 
   // --- UI Components ---
 
-  const Sidebar = () => (
-    <div className="w-20 lg:w-64 bg-surface border-r border-white/5 flex flex-col h-full shrink-0 transition-all duration-300">
-      <div className="p-6 flex items-center gap-3">
-        <div className="w-8 h-8 bg-white/5 rounded-lg flex items-center justify-center shrink-0 overflow-hidden border border-white/5">
-          <img src="/logo-openshorts.png" alt="Logo" className="w-full h-full object-cover" />
+  // The Clip Generator is the only product on this page. Other tools
+  // (AI Shorts / UGC Gallery / YouTube Studio) are temporarily hidden
+  // from the dashboard because each is moving to its own dedicated page.
+  // The header surfaces only the three product tabs (Clip Generator,
+  // Subtitle, Dub) and the overflow menu keeps the rarer ones
+  // (Settings, Pricing, About). Past Projects is no longer a tab — it
+  // lives inline inside each product's own page.
+  const PRIMARY_TAB = 'dashboard';
+  const OVERFLOW_TABS = [
+    { id: 'settings',    label: 'Settings',       icon: Settings },
+    { id: 'pricing',     label: 'Pricing',        icon: Tag },
+    { id: 'about',       label: 'About',          icon: Info },
+  ];
+
+  const [overflowOpen, setOverflowOpen] = useState(false);
+  // Close overflow when clicking outside
+  useEffect(() => {
+    if (!overflowOpen) return;
+    const close = () => setOverflowOpen(false);
+    window.addEventListener('click', close);
+    return () => window.removeEventListener('click', close);
+  }, [overflowOpen]);
+
+  /**
+   * Klipra top-bar nav. Logo on the left; the three products on the
+   * right. The overflow menu carries the rarer routes (Settings,
+   * Pricing, About, sign out, landing). Past Projects is NOT here —
+   * each product shows its own past-projects panel inline.
+   */
+  const TopBar = () => {
+    // Definitive list of the three products. Order is locked: clip
+    // generation first (the flagship), subtitle, then dub. Each entry
+    // owns its accent so active state colour-codes the tab.
+    const PRODUCTS = [
+      { id: 'dashboard', label: 'Generate Viral Clips', icon: Sparkles, accentText: 'text-primary',     accentBg: 'bg-primary/10' },
+      { id: 'smartclip', label: 'Smart Clipper',        icon: Brain,    accentText: 'text-violet-300', accentBg: 'bg-violet-500/10' },
+      { id: 'h2v',       label: 'Horizontal → Vertical',icon: Film,     accentText: 'text-fuchsia-300',accentBg: 'bg-fuchsia-500/10' },
+      { id: 'subtitle',  label: 'Auto Subtitle',        icon: Type,     accentText: 'text-orange-300',  accentBg: 'bg-orange-500/10' },
+      { id: 'dub',       label: 'Voice Dubbing',        icon: Languages, accentText: 'text-emerald-300', accentBg: 'bg-emerald-500/10' },
+    ];
+    return (
+    <header className="h-14 sm:h-16 border-b border-border bg-surface/80 backdrop-blur-md flex items-center justify-between px-3 sm:px-5 shrink-0 z-20 relative">
+      {/* LEFT — logo only. No breadcrumb; the active product is
+          highlighted on the right side instead, which is more honest
+          about where the user is. */}
+      <div className="flex items-center min-w-0">
+        <button
+          onClick={() => setActiveTab('home')}
+          className="flex items-center shrink-0"
+          aria-label="Klipra home"
+        >
+          <KlipraLogo size={28} showWordmark />
+        </button>
+      </div>
+
+      {/* RIGHT — three product tabs + overflow menu. */}
+      <div className="flex items-center gap-1.5 sm:gap-2">
+        {/* New Project — visible only when a job is in flight or done */}
+        {status !== 'idle' && (
+          <button
+            onClick={handleReset}
+            className="hidden md:inline-flex items-center gap-1.5 text-xs text-zinc-300 hover:text-white px-2.5 py-1.5 rounded-md hover:bg-white/5"
+          >
+            <PlusCircle size={14} /> New
+          </button>
+        )}
+        {PRODUCTS.map(({ id, label, icon: Icon, accentText, accentBg }) => {
+          const active = activeTab === id;
+          // Click behaviour:
+          //   - inactive tab → switch to it (state preserved)
+          //   - active tab   → reset to its home/idle view, so users
+          //     viewing a past project can re-click the tab name to
+          //     get back to "Add a video" without hunting for a back
+          //     button. Also matches what users expect from native
+          //     browser tab clicks.
+          return (
+            <button
+              key={id}
+              onClick={() => active ? goHomeOfTab(id) : setActiveTab(id)}
+              className={
+                'inline-flex items-center gap-1.5 text-xs sm:text-[13px] font-medium px-2.5 sm:px-3 py-1.5 rounded-md transition ' +
+                (active
+                  ? `${accentText} ${accentBg}`
+                  : 'text-zinc-300 hover:text-white hover:bg-white/5')
+              }
+              title={active ? `${label} — click again for home` : label}
+            >
+              <Icon size={14} />
+              {/* Hide labels on very narrow screens — only icon + active
+                  pill remains, which is still readable. */}
+              <span className="hidden md:inline">{label}</span>
+            </button>
+          );
+        })}
+        {!apiKey && (
+          <span className="hidden lg:inline-block text-[10px] uppercase tracking-wider text-amber-400 bg-amber-500/10 px-2 py-1 rounded-full border border-amber-500/30">
+            No AI key
+          </span>
+        )}
+        {/* Auth — sign in / sign up when logged out, avatar menu when in.
+            Uses an inline initial so users can tell at a glance which
+            account they're signed in as. */}
+        {!currentUser ? (
+          <div className="flex items-center gap-1">
+            <button
+              onClick={() => setAuthModalTab('signin')}
+              className="hidden sm:inline-flex items-center text-xs px-2.5 py-1.5 rounded-md text-zinc-300 hover:text-white hover:bg-white/5"
+            >
+              Sign in
+            </button>
+            <button
+              onClick={() => setAuthModalTab('signup')}
+              className="inline-flex items-center text-xs sm:text-[13px] font-medium px-2.5 sm:px-3 py-1.5 rounded-md bg-primary/15 text-primary hover:bg-primary/25"
+            >
+              Sign up
+            </button>
+          </div>
+        ) : (
+          <div className="relative" onClick={(e) => e.stopPropagation()}>
+            <button
+              onClick={() => setUserMenuOpen((v) => !v)}
+              className="inline-flex items-center gap-1.5 px-1.5 py-1 rounded-md hover:bg-white/5"
+              aria-label="Account menu"
+            >
+              <span className="w-7 h-7 rounded-full bg-primary/20 border border-primary/40 text-primary text-xs font-bold flex items-center justify-center">
+                {(currentUser.email || '?').charAt(0).toUpperCase()}
+              </span>
+              <ChevronDown size={12} className="text-zinc-400" />
+            </button>
+            {userMenuOpen && (
+              <div className="absolute right-0 top-full mt-1.5 w-64 rounded-xl border border-border bg-elevated shadow-2xl py-2 z-50">
+                <div className="px-3 py-2 border-b border-white/5">
+                  <div className="text-[12px] font-medium text-white truncate">{currentUser.full_name || currentUser.email}</div>
+                  <div className="text-[10px] text-zinc-500 truncate">{currentUser.email}</div>
+                  <div className="mt-1 inline-flex items-center gap-1 text-[10px] uppercase tracking-wider px-1.5 py-0.5 rounded-full bg-primary/10 text-primary border border-primary/20">
+                    {currentUser.plan || 'free'} plan
+                    {currentUser.jobs_limit != null && (
+                      <span className="text-zinc-400 normal-case">· {currentUser.jobs_used}/{currentUser.jobs_limit} jobs used</span>
+                    )}
+                  </div>
+                </div>
+                <button
+                  onClick={() => { setActiveTab('pricing'); setUserMenuOpen(false); }}
+                  className="w-full flex items-center gap-3 px-3 py-2 text-sm text-left text-zinc-300 hover:text-white hover:bg-white/5"
+                >
+                  <Tag size={14} /> Plans &amp; pricing
+                </button>
+                {currentUser.stripe_customer_id && (
+                  <button
+                    onClick={async () => {
+                      setUserMenuOpen(false);
+                      try {
+                        const r = await fetch(getApiUrl('/api/billing/portal'), {
+                          method: 'POST',
+                          headers: { Authorization: `Bearer ${authToken}` },
+                        });
+                        if (!r.ok) throw new Error(await r.text());
+                        const { url } = await r.json();
+                        if (url) window.location.href = url;
+                      } catch (e) { alert('Could not open billing portal: ' + e.message); }
+                    }}
+                    className="w-full flex items-center gap-3 px-3 py-2 text-sm text-left text-zinc-300 hover:text-white hover:bg-white/5"
+                  >
+                    <Settings size={14} /> Manage subscription
+                  </button>
+                )}
+                <button
+                  onClick={signOut}
+                  className="w-full flex items-center gap-3 px-3 py-2 text-sm text-left text-zinc-300 hover:text-white hover:bg-white/5"
+                >
+                  <LogOut size={14} /> Sign out
+                </button>
+              </div>
+            )}
+          </div>
+        )}
+        {/* Overflow menu */}
+        <div className="relative" onClick={(e) => e.stopPropagation()}>
+          <button
+            onClick={() => setOverflowOpen((v) => !v)}
+            aria-label="Open menu"
+            className={
+              'p-2 rounded-md transition ' +
+              (overflowOpen ? 'bg-white/10 text-white' : 'text-zinc-300 hover:text-white hover:bg-white/5')
+            }
+          >
+            <Menu size={18} />
+          </button>
+          {overflowOpen && (
+            <div className="absolute right-0 top-full mt-1.5 w-56 rounded-xl border border-border bg-elevated shadow-2xl py-1.5 z-50">
+              {OVERFLOW_TABS.map(({ id, label, icon: Icon }) => (
+                <button
+                  key={id}
+                  onClick={() => { setActiveTab(id); setOverflowOpen(false); }}
+                  className={
+                    'w-full flex items-center gap-3 px-3 py-2 text-sm text-left transition ' +
+                    (activeTab === id
+                      ? 'text-primary bg-primary/10'
+                      : 'text-zinc-300 hover:text-white hover:bg-white/5')
+                  }
+                >
+                  <Icon size={16} /> {label}
+                </button>
+              ))}
+              <button
+                onClick={() => { setShowInfluencer(true); setOverflowOpen(false); }}
+                className="w-full flex items-center gap-3 px-3 py-2 text-sm text-left text-zinc-300 hover:text-white hover:bg-white/5"
+              >
+                <Sparkles size={16} /> Influencer program
+              </button>
+              <div className="my-1.5 border-t border-border" />
+              <a
+                href="#"
+                onClick={(e) => {
+                  e.preventDefault();
+                  setOverflowOpen(false);
+                  localStorage.removeItem('klipra_skip_landing');
+                  localStorage.removeItem('openshorts_skip_landing');
+                  window.location.hash = '';
+                  window.location.reload();
+                }}
+                className="flex items-center gap-3 px-3 py-2 text-sm text-zinc-300 hover:text-white hover:bg-white/5"
+              >
+                <Globe size={16} /> Landing page
+              </a>
+              <div className="px-3 pt-2 pb-1 text-[10px] uppercase tracking-wider text-zinc-600">
+                klipra · v0.1
+              </div>
+            </div>
+          )}
         </div>
-        <span className="font-bold text-lg text-white hidden lg:block tracking-tight">OpenShorts</span>
       </div>
-
-      <nav className="flex-1 px-4 py-4 space-y-2">
-        <button
-          onClick={() => setActiveTab('dashboard')}
-          className={`w-full flex items-center gap-3 px-3 py-3 rounded-xl transition-colors ${activeTab === 'dashboard' ? 'bg-primary/10 text-primary' : 'text-zinc-400 hover:text-white hover:bg-white/5'}`}
-        >
-          <LayoutDashboard size={20} />
-          <span className="font-medium hidden lg:block">Clip Generator</span>
-        </button>
-
-        <button
-          onClick={() => setActiveTab('saasshorts')}
-          className={`w-full flex items-center gap-3 px-3 py-3 rounded-xl transition-colors ${activeTab === 'saasshorts' ? 'bg-violet-500/10 text-violet-400' : 'text-zinc-400 hover:text-white hover:bg-white/5'}`}
-        >
-          <Sparkles size={20} />
-          <span className="font-medium hidden lg:block">AI Shorts</span>
-        </button>
-
-        <button
-          onClick={() => setActiveTab('ugc-gallery')}
-          className={`w-full flex items-center gap-3 px-3 py-3 rounded-xl transition-colors ${activeTab === 'ugc-gallery' ? 'bg-violet-500/10 text-violet-400' : 'text-zinc-400 hover:text-white hover:bg-white/5'}`}
-        >
-          <LayoutGrid size={20} />
-          <span className="font-medium hidden lg:block">UGC Gallery</span>
-        </button>
-
-        <button
-          onClick={() => setActiveTab('thumbnails')}
-          className={`w-full flex items-center gap-3 px-3 py-3 rounded-xl transition-colors ${activeTab === 'thumbnails' ? 'bg-primary/10 text-primary' : 'text-zinc-400 hover:text-white hover:bg-white/5'}`}
-        >
-          <Image size={20} />
-          <span className="font-medium hidden lg:block">YouTube Studio</span>
-        </button>
-
-        {/* <button
-          onClick={() => setActiveTab('gallery')}
-          className={`w-full flex items-center gap-3 px-3 py-3 rounded-xl transition-colors ${activeTab === 'gallery' ? 'bg-primary/10 text-primary' : 'text-zinc-400 hover:text-white hover:bg-white/5'}`}
-        >
-          <LayoutGrid size={20} />
-          <span className="font-medium hidden lg:block">Gallery</span>
-        </button> */}
-
-        <button
-          onClick={() => setActiveTab('settings')}
-          className={`w-full flex items-center gap-3 px-3 py-3 rounded-xl transition-colors ${activeTab === 'settings' ? 'bg-primary/10 text-primary' : 'text-zinc-400 hover:text-white hover:bg-white/5'}`}
-        >
-          <Settings size={20} />
-          <span className="font-medium hidden lg:block">Settings</span>
-        </button>
-      </nav>
-
-      <div className="p-4 border-t border-white/5 space-y-2">
-        <a
-          href="#"
-          onClick={(e) => { e.preventDefault(); localStorage.removeItem('openshorts_skip_landing'); window.location.hash = ''; window.location.reload(); }}
-          className="flex items-center gap-2 p-3 bg-white/5 hover:bg-white/10 rounded-xl transition-colors group"
-        >
-          <div className="w-8 h-8 rounded-full bg-primary/20 text-primary flex items-center justify-center shrink-0">
-            <Globe size={16} />
-          </div>
-          <div className="hidden lg:block overflow-hidden">
-            <p className="text-sm font-bold text-white leading-none mb-0.5">Landing Page</p>
-            <p className="text-[10px] text-zinc-400 group-hover:text-zinc-300 transition-colors truncate">View website</p>
-          </div>
-        </a>
-        <a
-          href="https://github.com/mutonby/openshorts"
-          target="_blank"
-          rel="noopener noreferrer"
-          className="flex items-center gap-2 p-3 bg-white/5 hover:bg-white/10 rounded-xl transition-colors group"
-        >
-          <div className="w-8 h-8 rounded-full bg-white text-black flex items-center justify-center shrink-0">
-            <svg height="20" viewBox="0 0 16 16" version="1.1" width="20" aria-hidden="true"><path fillRule="evenodd" d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z"></path></svg>
-          </div>
-          <div className="hidden lg:block overflow-hidden">
-            <p className="text-sm font-bold text-white leading-none mb-0.5">Open Source</p>
-            <p className="text-[10px] text-zinc-400 group-hover:text-zinc-300 transition-colors truncate">Free & Community Driven</p>
-          </div>
-        </a>
-      </div>
-    </div>
-  );
+    </header>
+    );
+  };
 
   return (
-    <div className="flex h-screen bg-background overflow-hidden selection:bg-primary/30">
-      <Sidebar />
+    <div className="flex flex-col h-screen bg-background overflow-hidden selection:bg-primary/30">
+      {/* Top app bar — replaces the old left sidebar entirely */}
+      <TopBar />
+
+      {/* Optional second-row utility strip — only shows when there's
+          something useful to surface (Upload-Post profile picker etc.) */}
+      {userProfiles.length > 0 && (
+        <div className="border-b border-border bg-background/60 backdrop-blur-sm px-3 sm:px-5 py-2 flex items-center justify-end shrink-0">
+          <UserProfileSelector
+            profiles={userProfiles}
+            selectedUserId={uploadUserId}
+            onSelect={setUploadUserId}
+          />
+        </div>
+      )}
 
       <main className="flex-1 flex flex-col h-full overflow-hidden relative">
         {/* Background Gradients */}
         <div className="absolute inset-0 overflow-hidden -z-10 pointer-events-none">
-          <div className="absolute -top-[10%] -right-[10%] w-[50%] h-[50%] bg-primary/5 rounded-full blur-[120px]" />
+          <div className="absolute -top-[10%] -right-[10%] w-[60%] h-[50%] bg-primary/5 rounded-full blur-[120px]" />
+          <div className="absolute -bottom-[20%] -left-[10%] w-[50%] h-[50%] bg-accent/5 rounded-full blur-[120px]" />
         </div>
-
-        {/* Top Header */}
-        <header className="h-16 border-b border-white/5 bg-background/50 backdrop-blur-md flex items-center justify-between px-6 shrink-0 z-10">
-          <div className="flex items-center gap-4">
-            {status !== 'idle' && (
-              <button
-                onClick={handleReset}
-                className="flex items-center gap-2 text-sm text-zinc-400 hover:text-white transition-colors"
-              >
-                <PlusCircle size={16} />
-                <span className="hidden sm:inline">New Project</span>
-              </button>
-            )}
-          </div>
-
-          <div className="flex items-center gap-4">
-            {userProfiles.length > 0 && (
-              <UserProfileSelector
-                profiles={userProfiles}
-                selectedUserId={uploadUserId}
-                onSelect={setUploadUserId}
-              />
-            )}
-
-            {!apiKey && (
-              <span className="text-xs text-amber-500 bg-amber-500/10 px-3 py-1 rounded-full border border-amber-500/20">
-                API Key Missing
-              </span>
-            )}
-          </div>
-        </header>
 
         {/* Session Recovery Banner */}
         {sessionRecovered && (
@@ -697,30 +1164,228 @@ function App() {
             <ThumbnailStudio geminiApiKey={apiKey} uploadPostKey={uploadPostKey} uploadUserId={uploadUserId} />
           )}
 
+          {/* View: Home — in-app homepage with feature explainers and
+              demo videos. Reachable any time by clicking the Klipra
+              logo. Distinct from the pre-app Landing.jsx which only
+              shows on first visit. */}
+          {activeTab === 'home' && (
+            <Home
+              currentUser={currentUser}
+              onChooseTab={setActiveTab}
+            />
+          )}
+
+          {/* Past Projects view used to live here as its own tab. It now
+              lives INSIDE the Clip Generator landing page (the dashboard
+              idle view below) — see <PastProjects compact /> there. The
+              Subtitle and Dub pages each have their own equivalent
+              (<StandalonePastList />). The header only shows the three
+              products, nothing else. */}
+
+          {/* View: Pricing */}
+          {activeTab === 'pricing' && (
+            <Pricing
+              onChooseTab={setActiveTab}
+              onSignupClick={() => setAuthModalTab('signup')}
+              onChoosePlan={async (plan) => {
+                // Need an account before we can attach a Stripe customer.
+                if (!currentUser) { setAuthModalTab('signup'); return; }
+                try {
+                  const r = await fetch(getApiUrl('/api/billing/checkout'), {
+                    method: 'POST',
+                    headers: {
+                      'Content-Type': 'application/json',
+                      Authorization: `Bearer ${authToken}`,
+                    },
+                    body: JSON.stringify({ plan }),
+                  });
+                  if (!r.ok) {
+                    const t = await r.text();
+                    // 503 = Stripe not configured. Show a friendly fallback.
+                    if (r.status === 503) {
+                      alert('Billing is launching soon — drop us a line at hello@ilmeaalim.com to get on the early-access list.');
+                    } else {
+                      throw new Error(t || `HTTP ${r.status}`);
+                    }
+                    return;
+                  }
+                  const { url } = await r.json();
+                  if (url) window.location.href = url;
+                } catch (e) {
+                  alert('Could not start checkout: ' + e.message);
+                }
+              }}
+            />
+          )}
+
+          {/* View: About */}
+          {activeTab === 'about' && (
+            <About onChooseTab={setActiveTab} />
+          )}
+
+          {/* View: Standalone Subtitle (whole-video subtitle burn) */}
+          {activeTab === 'subtitle' && (() => {
+            // Build LLM headers fresh from localStorage so the page
+            // always has the latest provider config.
+            let provider = llmConfig?.provider || 'gemini';
+            let model = llmConfig?.model || 'gemini-2.5-flash';
+            let key = apiKey || '';
+            try {
+              const prefRaw = localStorage.getItem('os_llm_pref_last');
+              if (prefRaw) { const p = JSON.parse(prefRaw); if (p?.provider) provider = p.provider; if (p?.model) model = p.model; }
+              const keyRaw = localStorage.getItem(`os_llm_key_${provider}`);
+              if (keyRaw) {
+                const SALT = 'openshorts-llm-v1';
+                const decoded = atob(keyRaw); let out = '';
+                for (let i = 0; i < decoded.length; i++) out += String.fromCharCode(decoded.charCodeAt(i) ^ SALT.charCodeAt(i % SALT.length));
+                if (out) key = out;
+              }
+            } catch {}
+            const llmHeaders = {
+              'X-LLM-Provider': provider, 'X-LLM-Model': model, 'X-LLM-Key': key,
+              'X-Gemini-Key': provider === 'gemini' ? key : '',
+            };
+            return <StandaloneSubtitle llmHeaders={llmHeaders} elevenLabsKey={elevenLabsKey} homeBump={tabHomeBump.subtitle} currentUser={currentUser} onChooseTab={setActiveTab} />;
+          })()}
+
+          {/* View: Standalone Dub (whole-video translation + voice) */}
+          {activeTab === 'dub' && (() => {
+            let provider = llmConfig?.provider || 'gemini';
+            let model = llmConfig?.model || 'gemini-2.5-flash';
+            let key = apiKey || '';
+            try {
+              const prefRaw = localStorage.getItem('os_llm_pref_last');
+              if (prefRaw) { const p = JSON.parse(prefRaw); if (p?.provider) provider = p.provider; if (p?.model) model = p.model; }
+              const keyRaw = localStorage.getItem(`os_llm_key_${provider}`);
+              if (keyRaw) {
+                const SALT = 'openshorts-llm-v1';
+                const decoded = atob(keyRaw); let out = '';
+                for (let i = 0; i < decoded.length; i++) out += String.fromCharCode(decoded.charCodeAt(i) ^ SALT.charCodeAt(i % SALT.length));
+                if (out) key = out;
+              }
+            } catch {}
+            const llmHeaders = {
+              'X-LLM-Provider': provider, 'X-LLM-Model': model, 'X-LLM-Key': key,
+              'X-Gemini-Key': provider === 'gemini' ? key : '',
+            };
+            return <StandaloneDub llmHeaders={llmHeaders} elevenLabsKey={elevenLabsKey} homeBump={tabHomeBump.dub} />;
+          })()}
+
+          {/* View: Smart Clipper (multimodal viral-moment picker) */}
+          {activeTab === 'smartclip' && (
+            <SmartClipper
+              currentUser={currentUser}
+              onChooseTab={setActiveTab}
+              uploadPostKey={uploadPostKey}
+              uploadUserId={uploadUserId}
+              geminiApiKey={apiKey}
+              llmConfig={llmConfig}
+              elevenLabsKey={elevenLabsKey}
+            />
+          )}
+
+          {/* View: Horizontal → Vertical editor — full-canvas timeline
+              editor for converting a long horizontal video into one or
+              many vertical 9:16 clips with AI-proposed topic boundaries,
+              intelligent merge, and per-clip speaker focus tracking. */}
+          {activeTab === 'h2v' && (
+            <HorizontalToVertical
+              apiKey={apiKey}
+              llmConfig={llmConfig}
+              setApiKey={setApiKey}
+              elevenLabsKey={elevenLabsKey}
+              onBack={() => setActiveTab('home')}
+            />
+          )}
+
           {/* View: Gallery */}
           {/* {activeTab === 'gallery' && (
             <Gallery />
           )} */}
 
-          {/* View: Dashboard (Idle) */}
+          {/* View: Dashboard (Idle)
+
+              Scroll-aware layout: the outer wrapper owns the scrollbar
+              (h-full + overflow-y-auto), and the inner wrapper uses
+              min-h-full + flex items-center to vertically-center the
+              content WHEN it fits and let it scroll naturally WHEN the
+              Options panel is expanded and overflows. Without this, on
+              shorter laptops the "Generate Clips" button gets clipped
+              below the viewport with no way to scroll to it. */}
           {activeTab === 'dashboard' && status === 'idle' && (
-            <div className="h-full flex flex-col items-center justify-center p-6 animate-[fadeIn_0.3s_ease-out]">
-              <div className="max-w-xl w-full text-center space-y-8">
-                <div className="space-y-4">
-                  <h1 className="text-4xl md:text-5xl font-black bg-gradient-to-b from-white to-white/60 bg-clip-text text-transparent">
-                    Create Viral Shorts
-                  </h1>
-                  <p className="text-zinc-400 text-lg">
-                    Drop your long-form video URL or file below to instantly generate viral clips with AI.
-                  </p>
-                </div>
+            <div className="h-full overflow-y-auto custom-scrollbar animate-[fadeIn_0.3s_ease-out]">
+              <div className="min-h-full flex flex-col items-center justify-center p-6 py-10">
+                <div className="max-w-xl w-full text-center space-y-8">
+                  <div className="space-y-4">
+                    <h1 className="text-4xl md:text-5xl font-black bg-gradient-to-b from-white to-white/60 bg-clip-text text-transparent">
+                      Create Viral Shorts
+                    </h1>
+                    <p className="text-zinc-400 text-lg">
+                      Drop your long-form video URL or file below to instantly generate viral clips with AI.
+                    </p>
+                  </div>
 
-                <MediaInput onProcess={handleProcess} isProcessing={status === 'processing'} />
+                  <MediaInput onProcess={handleProcess} isProcessing={status === 'processing'} />
 
-                <div className="flex items-center justify-center gap-8 text-zinc-500 text-sm">
-                  <span className="flex items-center gap-2"><Youtube size={16} /> YouTube</span>
-                  <span className="flex items-center gap-2"><Instagram size={16} /> Instagram</span>
-                  <span className="flex items-center gap-2"><TikTokIcon size={16} /> TikTok</span>
+                  {/* Interactive AI picker. Click → switch provider /
+                      model / paste key right here without going to
+                      Settings. Persists per-provider; once saved, stays
+                      saved for all future generations. */}
+                  <ProviderPicker
+                    onChange={({ provider, model, api_key }) => {
+                      setLlmConfig({ provider, model });
+                      if (api_key) setApiKey(api_key);
+                    }}
+                  />
+
+
+                  <div className="flex items-center justify-center gap-8 text-zinc-500 text-sm">
+                    <span className="flex items-center gap-2"><Youtube size={16} /> YouTube</span>
+                    <span className="flex items-center gap-2"><Instagram size={16} /> Instagram</span>
+                    <span className="flex items-center gap-2"><TikTokIcon size={16} /> TikTok</span>
+                  </div>
+
+                  {/* Past clip-generation projects — only this page's
+                      product. Auto-hides when empty so first-time users
+                      see a clean hero. Mirrors the equivalent panel
+                      inside Subtitle / Dub. */}
+                  <div className="text-left">
+                    <PastProjects
+                      compact
+                      onOpen={async (jobId) => {
+                        try {
+                          const r = await fetch(getApiUrl(`/api/status/${jobId}`));
+                          if (!r.ok) throw new Error('Job not found');
+                          const data = await r.json();
+                          const clips = (data.result && data.result.clips) || [];
+                          if (clips.length === 0) {
+                            alert('This project has no clips on disk — they may have been deleted. Try regenerating.');
+                            return;
+                          }
+                          setJobId(jobId);
+                          setStatus(data.status === 'completed' ? 'complete' : data.status);
+                          setLogs(data.logs || []);
+                          setResults(data.result || null);
+                          setProcessingMedia({
+                            type: 'url',
+                            payload: getApiUrl(clips[0].video_url || ''),
+                          });
+                          // Remember we came in via the past list so the
+                          // split-view header can show a "Back to past
+                          // projects" button instead of just "New".
+                          setOpenedFromPast(true);
+                        } catch (e) {
+                          alert('Could not load job: ' + e.message);
+                        }
+                      }}
+                      onDelete={async (jobId) => {
+                        if (!window.confirm('Delete this project and all its files?')) return;
+                        try {
+                          await fetch(getApiUrl(`/api/job/${jobId}`), { method: 'DELETE' });
+                        } catch { /* swallow */ }
+                      }}
+                    />
+                  </div>
                 </div>
               </div>
             </div>
@@ -732,6 +1397,19 @@ function App() {
 
               {/* Left Panel: Preview & Status */}
               <div className={`${status === 'complete' ? 'w-full md:w-[30%] lg:w-[25%]' : 'w-full md:w-[55%] lg:w-[60%]'} h-full flex flex-col border-r border-white/5 bg-black/20 p-6 overflow-y-auto custom-scrollbar transition-all duration-700 ease-in-out`}>
+                {/* Back to past projects — only shown when the current
+                    job was opened FROM the Past Projects list. Gives
+                    users a one-click route back to pick a different
+                    project instead of having to hunt for "New" in the
+                    top bar. */}
+                {openedFromPast && (
+                  <button
+                    onClick={handleReset}
+                    className="mb-4 inline-flex items-center gap-1.5 text-xs px-2.5 py-1.5 rounded-md border border-white/10 bg-white/5 text-zinc-300 hover:bg-white/10 hover:text-white transition self-start"
+                  >
+                    <RotateCcw size={12} /> Back to past projects
+                  </button>
+                )}
                 <div className="mb-6 flex items-center justify-between">
                   <h2 className="text-lg font-semibold flex items-center gap-2">
                     <Activity className={`text-primary ${status === 'processing' ? 'animate-pulse' : ''}`} size={20} />
@@ -753,6 +1431,7 @@ function App() {
                     syncedTime={syncedTime}
                     isSyncedPlaying={isSyncedPlaying}
                     syncTrigger={syncTrigger}
+                    llmConfig={llmConfig}
                   />
                 )}
 
@@ -792,20 +1471,33 @@ function App() {
                       {results.clips.length} Clips
                     </span>
                   )}
-                  {results?.cost_analysis && (
-                    <span className="text-xs bg-green-500/10 border border-green-500/20 text-green-400 px-2 py-0.5 rounded-full ml-2" title={`Input: ${results.cost_analysis.input_tokens} | Output: ${results.cost_analysis.output_tokens}`}>
-                      ${results.cost_analysis.total_cost.toFixed(5)}
+                  {results?.cost_analysis && typeof results.cost_analysis.total_cost === 'number' && (
+                    <span className="text-xs bg-green-500/10 border border-green-500/20 text-green-400 px-2 py-0.5 rounded-full ml-2" title={`Input: ${results.cost_analysis.input_tokens ?? 0} | Output: ${results.cost_analysis.output_tokens ?? 0}`}>
+                      ${(results.cost_analysis.total_cost || 0).toFixed(5)}
                     </span>
                   )}
-                  {results?.clips?.length > 1 && status === 'complete' && (
+                  {jobId && status === 'complete' && (
                     <button
-                      onClick={() => setShowScheduleWeek(true)}
-                      className="ml-auto flex items-center gap-1.5 px-3 py-1.5 bg-gradient-to-r from-purple-500/20 to-indigo-500/20 hover:from-purple-500/30 hover:to-indigo-500/30 border border-purple-500/30 text-purple-300 hover:text-purple-200 rounded-full text-xs font-bold transition-all"
+                      type="button"
+                      onClick={async () => {
+                        if (!window.confirm('Delete this generation and all its clips? This cannot be undone.')) return;
+                        try {
+                          await fetch(getApiUrl(`/api/job/${jobId}`), { method: 'DELETE' });
+                        } catch (e) { /* swallow — UI resets either way */ }
+                        setResults(null);
+                        setStatus('idle');
+                        setJobId(null);
+                        setLogs([]);
+                        setProcessingMedia(null);
+                      }}
+                      className="ml-2 text-xs text-zinc-500 hover:text-red-400 transition-colors flex items-center gap-1"
+                      title="Delete this generation"
                     >
-                      <Calendar size={14} />
-                      Programar Semana
+                      <Trash2 size={12} /> Delete
                     </button>
                   )}
+                  {/* "Programar Semana" weekly-scheduling shortcut removed
+                      — feature stays available per-clip via the Post action. */}
                 </h2>
 
                 <div className="flex-1 overflow-y-auto custom-scrollbar p-1">
@@ -820,6 +1512,7 @@ function App() {
                           uploadPostKey={uploadPostKey}
                           uploadUserId={uploadUserId}
                           geminiApiKey={apiKey}
+                          llmConfig={llmConfig}
                           elevenLabsKey={elevenLabsKey}
                           onPlay={(time) => handleClipPlay(time)}
                           onPause={handleClipPause}
@@ -833,8 +1526,36 @@ function App() {
                         <p className="text-sm">Waiting for clips...</p>
                       </div>
                     ) : status === 'error' ? (
-                      <div className="h-full flex flex-col items-center justify-center text-red-400 space-y-2">
-                        <p>Generation failed.</p>
+                      <div className="h-full flex flex-col items-center justify-center text-red-400 space-y-3 px-6 text-center">
+                        <p className="font-bold">Generation failed.</p>
+                        <p className="text-[12px] text-zinc-400 max-w-md">
+                          Already-finished steps (transcript, clip picks, rendered clips) are checkpointed on disk. Hit Resume to pick up where the previous attempt stopped — usually it just re-runs the failing step.
+                        </p>
+                        <button
+                          type="button"
+                          disabled={!jobId}
+                          onClick={async () => {
+                            if (!jobId) return;
+                            try {
+                              const r = await fetch(getApiUrl(`/api/retry/${jobId}`), {
+                                method: 'POST',
+                                headers: { 'Content-Type': 'application/json' },
+                              });
+                              if (!r.ok) {
+                                const t = await r.text();
+                                setLogs(prev => [...prev, `Resume failed: ${t}`]);
+                                return;
+                              }
+                              setLogs(prev => [...prev, '♻️ Resume queued — re-running with on-disk checkpoints…']);
+                              setStatus('processing');
+                            } catch (e) {
+                              setLogs(prev => [...prev, `Resume error: ${e.message || e}`]);
+                            }
+                          }}
+                          className="mt-2 px-4 py-2 rounded-md bg-amber-500 hover:bg-amber-400 text-black text-[12px] font-bold inline-flex items-center gap-1.5 disabled:opacity-40 disabled:cursor-not-allowed"
+                        >
+                          ♻️ Resume from checkpoint
+                        </button>
                       </div>
                     ) : null
                   )}
@@ -847,31 +1568,73 @@ function App() {
         </div>
 
         {/* Footer */}
-        <div className="h-8 border-t border-white/5 flex items-center justify-center shrink-0">
-          <span className="text-[10px] text-zinc-600">Made with ❤️ by <a href="https://www.upload-post.com" target="_blank" rel="noopener noreferrer" className="text-zinc-500 hover:text-white transition-colors">Upload-Post</a></span>
+        <div className="h-9 border-t border-white/5 flex items-center justify-center gap-4 shrink-0">
+          <button
+            onClick={() => setActiveTab('pricing')}
+            className="text-[10px] text-zinc-500 hover:text-white transition uppercase tracking-wider"
+          >
+            Pricing
+          </button>
+          <span className="text-zinc-700">·</span>
+          <button
+            onClick={() => setActiveTab('about')}
+            className="text-[10px] text-zinc-500 hover:text-white transition uppercase tracking-wider"
+          >
+            About
+          </button>
+          <span className="text-zinc-700">·</span>
+          <span className="text-[10px] text-zinc-600">
+            Made with <span aria-hidden="true">❤️</span> by <span className="text-zinc-400">Ilmeaalim</span>
+          </span>
         </div>
       </main>
 
       {/* Missing API Key Modal */}
-      {showKeyModal && (
+      {showKeyModal && (() => {
+        // Read the currently-active provider so the copy matches what
+        // the user actually picked. Without this, an OpenAI/Anthropic
+        // user gets "Gemini API Key Required" which is misleading.
+        let _activeProv = 'gemini';
+        try {
+          const prefRaw = localStorage.getItem('os_llm_pref_last');
+          if (prefRaw) {
+            const pref = JSON.parse(prefRaw);
+            if (pref?.provider) _activeProv = pref.provider;
+          }
+        } catch (_) { /* localStorage may be unavailable */ }
+        const _provNames = {
+          gemini: 'Google Gemini', openai: 'OpenAI', anthropic: 'Anthropic (Claude)',
+          openrouter: 'OpenRouter', groq: 'Groq', minimax: 'MiniMax', ollama: 'Ollama',
+        };
+        const _provKeyUrls = {
+          gemini: 'https://aistudio.google.com/app/apikey',
+          openai: 'https://platform.openai.com/api-keys',
+          anthropic: 'https://console.anthropic.com/settings/keys',
+          openrouter: 'https://openrouter.ai/keys',
+          groq: 'https://console.groq.com/keys',
+          minimax: 'https://platform.minimax.io',
+        };
+        const _provName = _provNames[_activeProv] || 'AI provider';
+        const _keyUrl = _provKeyUrls[_activeProv] || 'https://aistudio.google.com/app/apikey';
+        return (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm" onClick={() => setShowKeyModal(false)}>
           <div className="bg-[#18181b] border border-white/10 rounded-2xl p-6 max-w-md w-full mx-4 space-y-4 shadow-2xl" onClick={(e) => e.stopPropagation()}>
-            <h2 className="text-lg font-bold text-white">Gemini API Key Required</h2>
+            <h2 className="text-lg font-bold text-white">{_provName} API Key Required</h2>
             <p className="text-sm text-zinc-400">
-              You need a Google Gemini API key to use the Clip Generator. It's free and takes 30 seconds to get.
+              You need a {_provName} API key to use the Clip Generator. You can also switch to <strong className="text-emerald-300">Ollama (local)</strong> in the AI picker — it runs on your Mac and needs no key.
             </p>
             <div className="bg-white/5 border border-white/10 rounded-lg p-4 space-y-2">
-              <p className="text-xs font-semibold text-zinc-300">How to get your free key:</p>
+              <p className="text-xs font-semibold text-zinc-300">How to get your key:</p>
               <ol className="text-xs text-zinc-400 space-y-1 list-decimal list-inside">
-                <li>Go to <a href="https://aistudio.google.com/app/apikey" target="_blank" rel="noopener noreferrer" className="text-blue-400 underline">aistudio.google.com/app/apikey</a></li>
-                <li>Sign in with your Google account</li>
-                <li>Click "Create API Key"</li>
+                <li>Go to <a href={_keyUrl} target="_blank" rel="noopener noreferrer" className="text-blue-400 underline">{_keyUrl.replace(/^https?:\/\//, '')}</a></li>
+                <li>Sign in to your {_provName} account</li>
+                <li>Create an API key</li>
                 <li>Copy the key and paste it below</li>
               </ol>
             </div>
             <input
               type="text"
-              placeholder="Paste your Gemini API key here..."
+              placeholder={`Paste your ${_provName} API key here...`}
               className="w-full bg-black/50 border border-white/20 rounded-lg px-4 py-2.5 text-sm text-white placeholder-zinc-600 focus:outline-none focus:border-blue-500"
               onKeyDown={(e) => {
                 if (e.key === 'Enter' && e.target.value.trim()) {
@@ -911,7 +1674,7 @@ function App() {
             </div>
           </div>
         </div>
-      )}
+      ); })()}
 
       <ScheduleWeekModal
         isOpen={showScheduleWeek}
@@ -921,6 +1684,60 @@ function App() {
         uploadPostKey={uploadPostKey}
         uploadUserId={uploadUserId}
       />
+
+      {/* Auth + influencer modals — global so any page can trigger them. */}
+      {authModalTab && (
+        <AuthModal
+          initialTab={authModalTab}
+          onClose={() => setAuthModalTab(null)}
+          onSuccess={handleAuthSuccess}
+        />
+      )}
+      {showInfluencer && (
+        <InfluencerApplyModal onClose={() => setShowInfluencer(false)} />
+      )}
+    </div>
+  );
+}
+
+/**
+ * Tiny chip that shows the provider/model that WILL be sent on the next
+ * Generate Clips click. Reads from the same localStorage keys the request
+ * builder reads from, refreshed every 1.5s, so it matches what gets
+ * transmitted regardless of React state staleness.
+ */
+function ActiveProviderBadge() {
+  const [info, setInfo] = React.useState({ provider: '?', model: '?', hasKey: false });
+  React.useEffect(() => {
+    const tick = () => {
+      try {
+        const raw = localStorage.getItem('os_llm_pref_last');
+        const pref = raw ? JSON.parse(raw) : {};
+        const p = pref?.provider || 'gemini';
+        const m = pref?.model || 'gemini-2.5-flash';
+        const k = localStorage.getItem(`os_llm_key_${p}`);
+        setInfo({ provider: p, model: m, hasKey: !!k });
+      } catch {
+        setInfo({ provider: 'gemini', model: 'gemini-2.5-flash', hasKey: false });
+      }
+    };
+    tick();
+    const id = setInterval(tick, 1500);
+    return () => clearInterval(id);
+  }, []);
+
+  const ok = info.hasKey || info.provider === 'ollama';
+  return (
+    <div className={
+      'mt-3 mx-auto inline-flex items-center gap-2 px-3 py-1.5 rounded-full text-[11px] font-mono ' +
+      (ok ? 'bg-green-500/10 border border-green-500/20 text-green-300'
+          : 'bg-yellow-500/10 border border-yellow-500/30 text-yellow-300')
+    }>
+      <span className="text-zinc-500 uppercase tracking-wider">Active:</span>
+      <span className="font-bold">{info.provider}</span>
+      <span className="text-zinc-500">/</span>
+      <span>{info.model}</span>
+      {!ok && <span className="text-yellow-400">· no key set</span>}
     </div>
   );
 }

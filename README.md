@@ -1,299 +1,178 @@
-# OpenShorts.app
+# Klipra
+
+> **Free, self-hosted AI video studio.** Drop a long YouTube video in, get viral short-form clips out — vertical-cropped, subtitled, hook-overlaid and ready to post. Built on top of the open-source [OpenShorts](https://github.com/mutonby/openshorts) project, with deep changes that prioritise **free local AI** (Ollama) over paid APIs.
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Open Source](https://badges.frapsoft.com/os/v1/open-source.svg?v=103)](https://opensource.org/)
-[![PRs Welcome](https://img.shields.io/badge/PRs-welcome-brightgreen.svg)](http://makeapullrequest.com)
 [![Docker](https://img.shields.io/badge/Docker-Ready-2496ED?logo=docker&logoColor=white)](https://docs.docker.com/compose/)
-[![GitHub stars](https://img.shields.io/github/stars/mutonby/openshorts?style=social)](https://github.com/mutonby/openshorts)
-[![Last Commit](https://img.shields.io/github/last-commit/mutonby/openshorts)](https://github.com/mutonby/openshorts/commits/main)
+[![Fork](https://img.shields.io/badge/forked%20from-OpenShorts-blueviolet)](https://github.com/mutonby/openshorts)
 
-**Free & open source AI video platform** with 3 tools in one: **Clip Generator**, **AI Shorts (UGC videos with AI actors)**, and **YouTube Studio**. Self-hosted with Docker. No watermarks, no limits.
-
-https://github.com/user-attachments/assets/b45fa983-16b4-48b5-ac5b-a267836b9ad9
-
-
-
-### Video Tutorial: How it works
-[![OpenShorts Tutorial](https://img.youtube.com/vi/xlyjD1qCaX0/maxresdefault.jpg)](https://www.youtube.com/watch?v=xlyjD1qCaX0 "Click to watch the video on YouTube")
-
-*Click the image above to watch the full walkthrough.*
+Klipra is maintained by **[ilmeaalim.com](https://ilmeaalim.com)** and runs in production at **[klipra.ilmeaalim.com](https://klipra.ilmeaalim.com)**.
 
 ---
 
-## 3 Tools in 1 Platform
+## Why Klipra and not OpenShorts?
 
-### 1. Clip Generator
-Turn long YouTube videos or local uploads into viral-ready 9:16 shorts for TikTok, Instagram Reels, and YouTube Shorts.
+Klipra was forked from OpenShorts in early 2025. Since then it has diverged substantially — most of `app.py`, all of the multimodal Smart Clipper, the keyframed reframer, the AI Motion Graphics engine, the voice-dubbing pipeline and the entire dashboard have been rewritten or added.
 
-![Clip Generator](screenshots/clip-generator.png)
+The single biggest change: **Klipra runs on free local AI by default**. The original project required a paid Google Gemini key for everything. In Klipra you can pick **[Ollama](https://ollama.com)** as the provider for *every* AI step — clip picking, transcript cleanup, transliteration, motion-graphics planning, dubbing prompts — so the whole pipeline runs offline on your own machine at zero cost.
 
-![Clip Results](screenshots/clip-results.png)
+Other things Klipra adds on top of OpenShorts:
 
-### 2. AI Shorts (UGC Video Creator)
-Generate marketing videos with AI actors for **any product or business**. No camera, no studio, no influencer budget. Just describe your product or paste a URL.
-
-![AI Shorts Setup](screenshots/ai-shorts.png)
-
-- **Two cost modes**: Low Cost (~$0.65/video) and Premium (~$2/video)
-- Works for any business: SaaS, restaurants, e-commerce, coaching, local businesses
-- AI-generated actors with lip-sync, voiceover, b-roll, and TikTok-style subtitles
-- Choose from a shared avatar gallery or upload your own photo
-- Publish directly to TikTok, Instagram, and YouTube
-
-### 3. YouTube Studio
-Complete free AI YouTube toolkit: thumbnails, titles, descriptions, and direct publishing.
-
-![YouTube Studio](screenshots/youtube-studio.png)
-
-- AI thumbnail generator with face overlay
-- 10 viral title suggestions with refinement chat
-- Auto-generated descriptions with chapter timestamps
-- One-click publish to YouTube
-
-### UGC Video Gallery
-All generated videos and avatars are saved to a public gallery with SEO pages for each video.
-
-![UGC Gallery](screenshots/ugc-gallery.png)
-
-- Public gallery page with hover-to-play (`/gallery`)
-- Individual SEO video pages with og:video meta tags (`/video/{id}`)
-- JSON-LD structured data for search engines
-- Avatar gallery with prompt history
+- **Smart Clipper (Fast + Pro)** — a multimodal-VLM picker that *watches* the video, not just reads the transcript. Pro mode is a 5-stage pipeline with sentence-boundary snapping and multi-size candidates.
+- **Standalone Subtitle** — three-phase flow (transcribe → style → burn) that works on any video without the full clip pipeline.
+- **Standalone Voice Dubbing** — 30+ languages via ElevenLabs, with optional target-language subtitle burn after dubbing.
+- **Keyframed Reframe** — arbitrary aspect (9:16 / 16:9 / 1:1 / custom), per-clip or full-video, draggable crop rectangle, face-aware tracking with scene-cut snapping.
+- **Word-level Subtitle Animations** — word-highlight, word-box, pop, karaoke, glow, all libass-burned.
+- **Hinglish / Roman Urdu / Urglish** subtitle modes — for creators producing Hindi/Urdu content who want Roman script on screen.
+- **BYOL (Bring Your Own Lyrics)** — paste your song lyrics, Klipra aligns them to the audio segment-by-segment using an LLM.
+- **AI Motion Graphics / Magic Overlays** — Auto mode lets the AI add zooms, pulses, drawtext callouts, highlight strips, with face-aware text placement.
+- **Voice Dubbing + Subtitles combo** — dub a clip, then burn target-language subtitles on top in one flow.
+- **Viral Hook Overlay** — auto-written punchy hook with emoji rendered as real raster glyphs (no tofu).
+- **AI Effects / Edit Modal** — pro-NLE-style modal with regions, motion presets (zoom-punch, slow-pan), colour grades, synthetic SFX library (whoosh, pop, impact, ding, riser).
+- **Retrim Modal** — visual source-video scrubber with audio waveform, zoom, playback speed, mark IN / mark OUT, draggable handles, undo, localStorage persistence.
+- **Whisper Metal Sidecar** — optional native macOS sidecar that runs Whisper on Apple Silicon GPU at 10-15× the in-container CPU speed.
+- **Local-file Mode** — process videos directly from `~/Desktop`, `~/Downloads`, `~/Documents` or `~/Movies` without uploading.
+- **Auth, Influencer Programme, Welcome Email, S3 Backup, Upload-Post integration** — full SaaS surface.
 
 ---
 
-## Key Features
+## Quick start (macOS / Linux)
 
-### Clip Generator
-- **Viral Moment Detection**: Google Gemini 3.0 Flash analyzes transcripts and scene boundaries to detect 3-15 high-potential moments
-- **Smart 9:16 Cropping**: Dual-mode AI reframing — TRACK mode (MediaPipe + YOLOv8 face tracking) and GENERAL mode (blurred background)
-- **Auto Subtitles**: faster-whisper with word-level timestamps, styled and burned into clips
-- **AI Voice Dubbing**: ElevenLabs integration for 30+ languages with voice cloning
-- **Hook Text Overlays**: AI-generated attention-grabbing text overlays
-- **AI Video Effects**: Gemini-generated FFmpeg filters for professional effects
+You need [Docker Desktop](https://www.docker.com/products/docker-desktop/) and `git`. On Mac, give Docker at least 8 GB RAM in Preferences → Resources.
 
-### AI Shorts Pipeline
-1. **Analyze**: Scrape website URL + web research, or generate from manual description
-2. **Script**: AI writes viral scripts (hook - problem - solution - CTA format)
-3. **Actor**: Generate AI actors with Flux 2 Pro or select from shared gallery
-4. **Voice**: ElevenLabs TTS voiceover (English/Spanish, male/female)
-5. **Video**: Talking head generation (Hailuo 2.3 Fast img2video + VEED Lipsync)
-6. **B-roll**: AI-generated visuals with Ken Burns effect
-7. **Composite**: FFmpeg final assembly with subtitles and hook overlays
-8. **Publish**: Direct posting to TikTok, Instagram Reels, YouTube Shorts via Upload-Post
-
-### YouTube Studio
-- AI-powered title generation with 10 viral options
-- Interactive refinement chat for titles
-- AI thumbnail generation with custom face + background
-- Auto descriptions with chapter timestamps from Whisper transcript
-- Direct YouTube publishing via Upload-Post
-
-### Social Auto-Publishing
-- **One-click posting** to TikTok, Instagram Reels, and YouTube Shorts simultaneously
-- **Schedule uploads** for any date and time — plan your content calendar and let OpenShorts publish automatically
-- **Multi-platform distribution** — publish to all your social networks at once from a single interface
-- Upload-Post integration with async uploads
-
-### Infrastructure
-- S3 cloud backup (private bucket for clips, public bucket for gallery/avatars)
-- SEO gallery pages served by FastAPI with JSON-LD structured data
-- Shared avatar gallery across all users
-- Async job queue with configurable concurrency
-
----
-
-## Who Is This For?
-
-- **Content creators** — Turn long videos into shorts automatically, publish to all platforms at once
-- **Marketing agencies** — Generate UGC videos for clients at scale, no actors or studios needed
-- **SaaS founders** — Create product demos and marketing shorts from just a URL
-- **E-commerce brands** — Product videos with AI actors for TikTok Shop, Instagram, YouTube
-- **Local businesses** — Restaurants, gyms, real estate, coaching — affordable video marketing
-- **Developers** — Self-host, customize the pipeline, integrate via API
-
----
-
-## AI Shorts Showcase
-
-Videos generated with OpenShorts AI Shorts — no camera, no studio, no actors:
-
-| | | |
-|:---:|:---:|:---:|
-| [![Biohacking for Investors](https://test-videos-upload-post.s3.eu-west-3.amazonaws.com/videos/cdceec1b/actor.png)](https://openshorts.app/video/cdceec1b) | [![Secret Weapon for Devs](https://test-videos-upload-post.s3.eu-west-3.amazonaws.com/videos/d3a80b6b/actor.png)](https://openshorts.app/video/d3a80b6b) | [![El Secreto de los Agentes de IA](https://test-videos-upload-post.s3.eu-west-3.amazonaws.com/videos/8ab7de92/actor.png)](https://openshorts.app/video/8ab7de92) |
-| **Biohacking for Investors** · LOW COST | **Secret Weapon for Devs** · LOW COST | **El Secreto de los Agentes de IA** · PREMIUM |
-
-> Browse all videos at [openshorts.app/gallery](https://openshorts.app/gallery)
-
----
-
-## OpenShorts vs Competitors
-
-| Feature | OpenShorts | Opus Clip | CapCut | Vizard | Klap | Descript |
-|---------|:---:|:---:|:---:|:---:|:---:|:---:|
-| **Price** | **Free** | $15-29/mo | $8/mo | $15-20/mo | $23-63/mo | $24-65/mo |
-| **Self-hosted** | **Yes** | No | No | No | No | No |
-| **Open source** | **Yes** | No | No | No | No | No |
-| **Watermark** | **Never** | Free tier | Some | Free tier | Free tier | Free tier |
-| **Upload limits** | **None** | 10-30GB | Credit-based | 60min-10hr | 10-100 vids/mo | 60min-40hr |
-| **AI clip detection** | Yes | Yes | Yes | Yes | Yes | Yes |
-| **Smart 9:16 reframing** | Yes | Yes | Yes | Yes | Yes | No |
-| **Auto subtitles** | Yes | Yes | Yes | Yes | Yes | Yes |
-| **Voice dubbing (30+ langs)** | Yes | No | Pro only | No | Pro only | Business only |
-| **AI UGC actors** | **Yes** | No | No | No | No | No |
-| **AI video effects** | Yes | No | Yes | No | No | No |
-| **Hook text overlays** | Yes | No | No | No | No | No |
-| **YouTube Studio (titles, thumbnails)** | **Yes** | No | No | No | No | No |
-| **Social auto-publishing** | Yes | Pro only | TikTok only | Paid only | Paid only | No |
-| **Schedule uploads** | Yes | Pro only | No | Paid only | Paid only | No |
-| **Data privacy** | **Your server** | Their cloud | Their cloud | Their cloud | Their cloud | Their cloud |
-
----
-
-## How Much Does It Cost?
-
-OpenShorts is free. You only pay for the AI APIs you use — and most have generous free tiers:
-
-| Service | Free Tier | Paid Cost | Used For |
-|---------|-----------|-----------|----------|
-| **Google Gemini** | Free trial with generous limits | < $0.01 per 10-min video | Viral moment detection, script generation, web research |
-| **fal.ai** | Pay-per-use | ~$0.50-1.50 per AI Short | Actor generation, talking head video, lip-sync |
-| **ElevenLabs** | Free tier available | Pay-per-use | Voiceover, voice dubbing |
-| **Upload-Post** | **10 free uploads/month** to all networks (no credit card) | Pay-per-use | Auto-publishing to TikTok, Instagram, YouTube |
-| **AWS S3** | Optional | ~$0.023/GB | Cloud backup for clips and gallery |
-
-**Bottom line:** You can clip videos for practically free with Gemini, and publish 10 videos/month to all social networks at zero cost with Upload-Post.
-
----
-
-## Requirements
-
-- **Docker & Docker Compose**
-- **Google Gemini API Key** ([Free — get it here](https://aistudio.google.com/app/apikey)) — required for all AI features
-- **fal.ai API Key** ([Pay-per-use](https://fal.ai)) — required for AI Shorts (actor generation, video, lip-sync)
-- **ElevenLabs API Key** ([Free tier](https://elevenlabs.io)) — required for voiceover/dubbing
-- **Upload-Post API Key** (Optional, [free tier](https://upload-post.com)) — for direct social posting
-
----
-
-## Getting Started
-
-### 1. Clone
 ```bash
-git clone https://github.com/your-username/OpenShorts.git
-cd OpenShorts
+git clone https://github.com/muqaddashahzad/Klipra.git
+cd Klipra
+cp .env.example .env       # fill in API keys you want to use (Gemini is optional)
+docker compose up -d
 ```
 
-### 2. Configure (optional)
-```bash
-cp .env.example .env
-# Edit .env with your AWS keys for S3 backup
+Once the three containers are healthy (`docker compose ps`), open:
+
+- **App:** http://localhost:5175
+- **API docs:** http://localhost:8000/docs
+
+If you want everything to run **completely free** with no API keys, install [Ollama](https://ollama.com), then double-click `Install-Ollama-Model.command` (or run `ollama pull qwen2.5:14b-instruct`). Klipra will detect the local daemon and let you pick it from the Provider dropdown.
+
+---
+
+## What's inside the box
+
+Three Docker services defined in `docker-compose.yml`:
+
+| Service | Container | Port | Purpose |
+|---|---|---|---|
+| `backend` | klipra-backend | 8000 | FastAPI server + all video processing (Whisper, mediapipe, ffmpeg, yt-dlp) |
+| `frontend` | klipra-frontend | 5175 → 5173 | React + Vite dashboard (hot-reload on edit) |
+| `renderer` | klipra-renderer | 4000 | Optional Remotion renderer for advanced compositions |
+
+Optional native sidecar (not in compose): `whisper_sidecar/` runs Whisper on the M-series Metal GPU. Start it with `./whisper_sidecar/start.sh` for ~10× faster transcription on Apple Silicon.
+
+Bind mounts (data survives `docker compose down`):
+- `./output` — past project artefacts
+- `./uploads` — uploaded source videos (content-hash deduped)
+- `./data` — accounts SQLite db (excluded from git)
+- `~/Desktop/Movies` → `/app/local_media` (read-only) for local-file mode
+
+---
+
+## The four products
+
+1. **Generate Viral Clips** *(full pipeline)* — drop a YouTube URL or video file; Klipra transcribes, picks 4–8 viral moments, cuts them, reframes 16:9 → 9:16 with face tracking, burns subtitles, adds a viral hook, and optionally posts to TikTok / Instagram / YouTube. `main.py` + `app.py`.
+2. **Smart Clipper** — multimodal VLM picker. **Fast** mode = single-pass with a per-signal scoring rubric (punchline, reversal, awkward_pause, one_liner, audio_peak, visual_energy). **Pro** mode = 5-stage pipeline. `multimodal_picker.py` + `smart_clipper_pro.py`.
+3. **Standalone Subtitle** — three-phase flow, no clip generation, works on any video. `subtitles.py`.
+4. **Standalone Voice Dubbing** — 30+ languages, optional target-language subtitle burn. `translate.py`.
+
+All four products feed into the same per-clip ResultCard, so subtitle / dub / edit / reframe / motion-graphics / post-to-social work on every output regardless of which product produced it.
+
+---
+
+## Repo layout
+
+```
+app.py                   FastAPI server (huge, ~520 KB; grep it)
+main.py                  core pipeline: download → transcribe → pick → cut → reframe → subtitle → hook
+multimodal_picker.py     Smart Clipper Fast picker
+smart_clipper_pro.py     Smart Clipper Pro 5-stage pipeline
+face_track.py            MediaPipe BlazeFace + ffmpeg scdet scene cuts
+reframe_kf.py            keyframed reframer (any aspect, per-clip or full video)
+motion_graphics.py       AI Magic Overlays
+subtitles.py             libass burn pipeline + word-level animations
+hooks.py                 viral hook overlay (Pillow renders emojis to PNG)
+editor.py                AI video effects (color, zoom, SFX library)
+translate.py             ElevenLabs voice dub
+accounts.py              user auth (SQLite)
+llm/                     provider adapters (gemini, ollama, openai, ...)
+whisper_sidecar/         optional native macOS Whisper service
+
+dashboard/src/
+  App.jsx                top-level routing + global state
+  components/            Home, SmartClipper, StandaloneSubtitle, StandaloneDub,
+                         ReframeKeyframeModal, MotionGraphicsModal, EditModal,
+                         SubtitleModal, RetrimModal, TranslateModal, ResultCard, ...
 ```
 
-### 3. Launch
+For a longer tour, read `CLAUDE.md` (intended as an entry point for AI coding agents but useful for humans too).
+
+---
+
+## Working locally
+
 ```bash
-docker compose up --build
+docker compose up -d              # start stack
+docker compose ps                 # status
+docker compose logs -f backend    # tail backend logs
+docker compose restart backend    # apply Python changes that need a kick
+docker compose down               # stop (data on disk survives)
+docker compose up -d --build      # rebuild after Dockerfile / requirements.txt change
 ```
 
-### 4. Open Dashboard
-Navigate to **`http://localhost:5175`**
+Hot-reload:
+- **Python** files (`*.py`) — live thanks to the `.:/app` bind mount; sometimes `docker compose restart backend` is needed.
+- **Frontend** (`dashboard/`) — Vite HMR auto-reloads; hard-refresh with **Cmd+Shift+R** if it goes stale.
 
-1. Go to **Settings** and enter your API keys (Gemini, fal.ai, ElevenLabs, Upload-Post)
-2. **Clip Generator**: Paste a YouTube URL or upload a video to generate viral shorts
-3. **AI Shorts**: Describe your product or paste a URL to generate UGC marketing videos
-4. **YouTube Studio**: Generate thumbnails, titles, and descriptions for YouTube
-5. **UGC Gallery**: Browse all generated videos and avatars
-
----
-
-## Technical Pipeline
-
-### Clip Generator
-1. **Ingest** — YouTube download (yt-dlp) or local upload
-2. **Transcribe** — faster-whisper with word-level timestamps
-3. **Detect** — PySceneDetect for scene boundaries
-4. **Analyze** — Gemini identifies 3-15 viral moments (15-60s each)
-5. **Extract** — FFmpeg precise clip cutting
-6. **Reframe** — AI vertical cropping with subject tracking
-7. **Effects** — Subtitles, hooks, AI video effects
-8. **Publish** — S3 backup + Upload-Post social distribution
-
-### AI Shorts
-1. **Analyze** — Website scraping + Gemini web research (or manual description)
-2. **Script** — Gemini generates viral scripts with segments
-3. **Actor** — Flux 2 Pro portrait generation (or gallery/upload)
-4. **Voice** — ElevenLabs TTS voiceover
-5. **Video** — Hailuo 2.3 Fast img2video + VEED Lipsync (Low Cost) or Kling Avatar v2 (Premium)
-6. **B-roll** — Flux 2 Pro image generation + Ken Burns effect
-7. **Composite** — FFmpeg assembly with ASS subtitles and hook overlays
-8. **Gallery** — Upload to public S3 with metadata for SEO pages
-9. **Publish** — Upload-Post to TikTok, Instagram, YouTube
+Mac one-click helpers (double-click in Finder):
+- `Restart-Backend.command` — `docker compose restart backend`
+- `Force-Restart-Backend.command` — full recreate when restart isn't enough
+- `Restart-All.command` — restart whole stack
+- `Apply-File-Folder-Access.command` — recreate backend with expanded local-file mounts
+- `Install-Ollama-Model.command` — pull the recommended `qwen2.5:14b-instruct` model
 
 ---
 
-## Tech Stack
+## API keys and environment
 
-| Layer | Technology |
-|-------|-----------|
-| Backend | Python 3.11, FastAPI, google-genai, faster-whisper, ultralytics (YOLOv8), mediapipe, opencv-python, yt-dlp, FFmpeg, httpx |
-| Frontend | React 18, Vite 4, Tailwind CSS 3.4 |
-| AI APIs | Google Gemini, fal.ai (Flux, Hailuo, VEED, Kling), ElevenLabs |
-| Infrastructure | Docker + Docker Compose, AWS S3 |
-| Publishing | Upload-Post API (TikTok, Instagram, YouTube) |
+Copy `.env.example` to `.env` and fill in whichever providers you want. **All are optional** if you use Ollama as the main provider.
 
----
-
-## Environment Variables
-
-**Server-side (.env):**
-| Variable | Description |
-|----------|------------|
-| `AWS_ACCESS_KEY_ID` | AWS access key for S3 |
-| `AWS_SECRET_ACCESS_KEY` | AWS secret key |
-| `AWS_REGION` | AWS region (default: us-east-1) |
-| `AWS_S3_BUCKET` | Private bucket for clip backup |
-| `AWS_S3_PUBLIC_BUCKET` | Public bucket for gallery/avatars |
-| `MAX_CONCURRENT_JOBS` | Concurrent processing limit (default: 5) |
-
-**Client-side (encrypted in localStorage):**
-| Key | Description |
-|-----|------------|
-| `GEMINI_API_KEY` | Google Gemini — required |
-| `FAL_KEY` | fal.ai — required for AI Shorts |
-| `ELEVENLABS_API_KEY` | ElevenLabs — required for voiceover/dubbing |
-| `UPLOAD_POST_API_KEY` | Upload-Post — optional, for social posting |
+| Variable | Used for | Free? |
+|---|---|---|
+| `GEMINI_API_KEY` | Google Gemini (clip picking, transcript cleanup) | Free tier: 20 RPM, 20 RPD |
+| `ELEVENLABS_API_KEY` | Voice dubbing / Scribe transcription | Paid |
+| `OPENAI_API_KEY` | Optional fallback LLM | Paid |
+| `UPLOAD_POST_API_KEY` | Posting to TikTok / IG / YouTube | Paid |
+| `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` | Silent S3 backup of finished clips | Paid |
+| `SMTP_HOST` / `SMTP_USER` / `SMTP_PASS` | Welcome email after signup | Free |
+| `KLIPRA_WHISPER_SIDECAR_URL` | Native Metal Whisper sidecar | Free |
+| `KLIPRA_OLLAMA_TIMEOUT` | Per-request Ollama timeout (seconds) | Free |
 
 ---
 
-## Security & Performance
+## Tech stack
 
-- **Non-Root Execution**: Containers run as dedicated `appuser`
-- **Concurrency Control**: Semaphore-based job queue (`MAX_CONCURRENT_JOBS`)
-- **Auto-Cleanup**: Automatic purging of old jobs (1h retention)
-- **Encrypted Keys**: API keys encrypted client-side, never stored server-side
-- **Upload Validation**: Image uploads validated for format and minimum size
-- **File Limits**: 2GB upload limit protection
+- **Backend (Python 3.11):** FastAPI · Uvicorn · faster-whisper · mediapipe · ultralytics (YOLOv8) · yt-dlp · ffmpeg-python · google-genai · ollama (via httpx) · Pillow · pysubs2 · libass · SQLAlchemy
+- **Frontend:** React 18 · Vite 4 · Tailwind 3.4 · lucide-react
+- **External services:** Google Gemini · ElevenLabs · Ollama · Upload-Post · AWS S3 · Hetzner + Plesk · Cloudflare
+- **Infra:** Docker · Docker Compose · macOS host with Apple Silicon
 
 ---
 
-## Social Media Setup (Upload-Post)
+## Credits and licence
 
-1. **Register**: [app.upload-post.com/login](https://app.upload-post.com/login)
-2. **Create Profile**: Go to [Manage Users](https://app.upload-post.com/manage-users)
-3. **Connect Accounts**: Link TikTok, Instagram, and/or YouTube
-4. **Get API Key**: Navigate to [API Keys](https://app.upload-post.com/api-keys)
-5. **Use in OpenShorts**: Paste the key in Settings
+Klipra is a fork of **OpenShorts** by [@mutonby](https://github.com/mutonby/openshorts). Huge thanks to the original team for putting the foundations under MIT.
 
----
+Klipra remains under the **[MIT licence](LICENSE)**. Use it, modify it, ship it — just keep the licence notice intact.
 
-## Star History
+If you build something with Klipra, tag [@ilmeaalim](https://ilmeaalim.com) — I'd love to see what you make.
 
-[![Star History Chart](https://api.star-history.com/svg?repos=mutonby/openshorts&type=Date)](https://star-history.com/#mutonby/openshorts&Date)
-
-## Contributions
-
-Contributions are welcome! Whether it's adding new AI models, improving the lip-sync pipeline, or building new features — feel free to open a PR.
-
-## License
-
-MIT License. OpenShorts is yours to use, modify, and scale.
+— Muqaddas Shahzad

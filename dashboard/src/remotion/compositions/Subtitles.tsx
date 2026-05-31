@@ -103,7 +103,9 @@ const SubtitleBlock: React.FC<SubtitleBlockProps> = ({
           display: "flex",
           flexWrap: "wrap",
           justifyContent: "center",
-          gap: "6px 8px",
+          // Gap scales with font size so word spacing stays readable at any size.
+          // Vertical gap is half horizontal (looks balanced when wrapping).
+          gap: `${(style.fontSize || 24) * 0.25}px ${(style.fontSize || 24) * 0.4}px`,
           maxWidth: "85%",
           ...bgStyle,
         }}
@@ -111,7 +113,9 @@ const SubtitleBlock: React.FC<SubtitleBlockProps> = ({
         {block.words.map((word, i) => (
           <WordSpan
             key={i}
-            word={word.text}
+            // Trim Whisper's per-word whitespace artifacts (Whisper often
+            // emits " hello" with a leading space which HTML collapses).
+            word={(word.text || '').trim()}
             isActive={i === activeIndex}
             style={style}
             fontStack={fontStack}

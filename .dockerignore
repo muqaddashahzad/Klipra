@@ -27,16 +27,36 @@ dashboard/node_modules/
 *.swp
 *.swo
 
-# Video files (will be mounted via volume)
-*.mp4
-*.avi
-*.mov
-*.mkv
-*.gif
+# Runtime data directories — already mounted as volumes by docker-compose,
+# so they should NEVER be baked into the image. This was the cause of the
+# huge-layer / I/O-error builds: every uploaded mp4 was being copied into
+# the image because *.mp4 below only matched the BUILD ROOT, not nested
+# files. Excluding the directories outright is the right rule.
+uploads/
+output/
+data/
 videos/
+**/__pycache__/
+.cache/
 
-# Model files (downloaded at build time)
-*.pt
+# Video / image files anywhere in the tree (defence-in-depth — even if a
+# stray sample mp4 ends up outside the data dirs above, don't ship it).
+# CRITICAL: use **/*.ext to match nested files. Bare *.ext only matches
+# the build-root level in Docker's .dockerignore syntax.
+**/*.mp4
+**/*.avi
+**/*.mov
+**/*.mkv
+**/*.webm
+**/*.gif
+**/*.png
+**/*.jpg
+**/*.jpeg
+
+# Model files (downloaded at build time, not committed)
+**/*.pt
+**/*.pth
+**/*.onnx
 
 # Docker
 Dockerfile

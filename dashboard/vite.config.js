@@ -7,7 +7,13 @@ export default defineConfig({
   server: {
     allowedHosts: [
       'openshorts.app',
-      'www.openshorts.app'
+      'www.openshorts.app',
+      'klipra.ilmeaalim.com',
+      'www.klipra.ilmeaalim.com',
+      'klipra.app',
+      'www.klipra.app',
+      '.klipra.app',
+      '.ilmeaalim.com'
     ],
     proxy: {
       '/api': {

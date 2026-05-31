@@ -24,8 +24,12 @@ output/
 .idea/
 .vscode/
 
-# Secrets
+# Secrets / private data
 .env
+data/
+*.db
+*.sqlite
+*.sqlite3
 
 # Generated metadata
 *_metadata.json
@@ -33,6 +37,7 @@ output/
 # Cache dirs
 .cache/
 .config/
+
 # Multi-agent Skills
 .agents/
 .agent/
@@ -40,3 +45,18 @@ output/
 skills/
 skills-lock.json
 
+# Whisper sidecar virtual environment (large, locally built)
+whisper_sidecar/.venv/
+
+# Debug dumps
+whisper_dump.txt
+*.dump
+
+# Whitelist small demo sample videos (under 100 MB)
+!dashboard/public/samples/subtitle-english.mp4
+!dashboard/public/samples/subtitle-horizontal.mp4
+!dashboard/public/samples/subtitled-italian.mp4
+!dashboard/public/samples/dub-french.mp4
+!dashboard/public/samples/dub-german.mp4
+# Note: source-original.mp4 is intentionally NOT whitelisted because
+# it exceeds GitHub's 100 MB file limit. See README for download URL.

@@ -38,17 +38,30 @@ const LANGUAGES = {
 
 export default function TranslateModal({ isOpen, onClose, onTranslate, isProcessing, videoUrl, hasApiKey }) {
     const [targetLanguage, setTargetLanguage] = useState('es');
+    const [dubProvider, setDubProvider] = useState(hasApiKey ? 'elevenlabs' : 'edge');
+    const [keepOriginal, setKeepOriginal] = useState(false);
+    const [originalVolume, setOriginalVolume] = useState(0.2);
+    // Save dubbed clip as a NEW entry instead of replacing the original.
+    const [keepSeparate, setKeepSeparate] = useState(true);
+    // Voice gender — auto = let LLM detect, or override.
+    const [voiceGender, setVoiceGender] = useState('auto');
 
     if (!isOpen) return null;
 
     const handleSubmit = () => {
-        console.log('[TranslateModal] handleSubmit called, targetLanguage:', targetLanguage);
-        onTranslate({ targetLanguage });
+        onTranslate({
+            targetLanguage,
+            dubProvider,
+            keepOriginal,
+            originalVolume,
+            keepSeparate,
+            voiceGender,
+        });
     };
 
     return (
         <div className="fixed inset-0 z-[100] flex items-center justify-center p-4 bg-black/80 backdrop-blur-sm animate-[fadeIn_0.2s_ease-out]">
-            <div className="bg-[#121214] border border-white/10 p-6 rounded-2xl w-full max-w-md shadow-2xl relative">
+            <div className="bg-[#121214] border border-white/10 p-6 rounded-2xl w-full max-w-md shadow-2xl relative max-h-[90vh] overflow-y-auto custom-scrollbar">
                 <button
                     onClick={onClose}
                     disabled={isProcessing}
@@ -63,14 +76,51 @@ export default function TranslateModal({ isOpen, onClose, onTranslate, isProcess
                     </div>
                     <div>
                         <h3 className="text-lg font-bold text-white">Dub Voice</h3>
-                        <p className="text-xs text-zinc-500">AI voice translation by ElevenLabs</p>
+                        <p className="text-xs text-zinc-500">
+                            {dubProvider === 'edge'
+                                ? 'Free dubbing with Microsoft Edge neural voices'
+                                : 'AI voice cloning by ElevenLabs'}
+                        </p>
                     </div>
                 </div>
 
-                {!hasApiKey && (
+                {/* Provider selector */}
+                <div className="mb-5">
+                    <label className="block text-sm font-medium text-zinc-400 mb-2">Engine</label>
+                    <div className="grid grid-cols-2 gap-2">
+                        <button
+                            type="button"
+                            onClick={() => setDubProvider('edge')}
+                            className={
+                                'rounded-lg border px-3 py-2 text-left text-sm transition ' +
+                                (dubProvider === 'edge'
+                                    ? 'border-green-500/60 bg-green-500/10 text-white'
+                                    : 'border-white/10 bg-black/30 text-zinc-300 hover:border-white/20')
+                            }
+                        >
+                            <div className="font-medium">Edge TTS</div>
+                            <div className="text-[11px] text-zinc-500">Free · no key · 21 langs</div>
+                        </button>
+                        <button
+                            type="button"
+                            onClick={() => setDubProvider('elevenlabs')}
+                            className={
+                                'rounded-lg border px-3 py-2 text-left text-sm transition ' +
+                                (dubProvider === 'elevenlabs'
+                                    ? 'border-green-500/60 bg-green-500/10 text-white'
+                                    : 'border-white/10 bg-black/30 text-zinc-300 hover:border-white/20')
+                            }
+                        >
+                            <div className="font-medium">ElevenLabs</div>
+                            <div className="text-[11px] text-zinc-500">Voice cloning · key needed</div>
+                        </button>
+                    </div>
+                </div>
+
+                {dubProvider === 'elevenlabs' && !hasApiKey && (
                     <div className="mb-4 p-3 bg-yellow-500/10 border border-yellow-500/20 text-yellow-200 text-xs rounded-lg flex items-start gap-2">
                         <AlertCircle size={14} className="mt-0.5 shrink-0" />
-                        <div>Configure ElevenLabs API Key in Settings first.</div>
+                        <div>ElevenLabs key not configured. Pick Edge TTS above for a free option.</div>
                     </div>
                 )}
 
@@ -105,10 +155,109 @@ export default function TranslateModal({ isOpen, onClose, onTranslate, isProcess
                     </select>
                 </div>
 
+                {/* Keep original voice (Edge TTS path) */}
+                {dubProvider === 'edge' && (
+                    <div className="mb-5 p-3 rounded-lg border border-white/10 bg-black/30">
+                        <label className="flex items-start gap-3 cursor-pointer">
+                            <input
+                                type="checkbox"
+                                checked={keepOriginal}
+                                onChange={(e) => setKeepOriginal(e.target.checked)}
+                                className="mt-0.5 h-4 w-4 cursor-pointer accent-green-500"
+                            />
+                            <span className="flex-1">
+                                <span className="block text-sm font-medium text-white">
+                                    Keep original voice underneath
+                                </span>
+                                <span className="text-xs text-zinc-500">
+                                    Documentary-style: original speaker plays softly, dub plays on top.
+                                </span>
+                            </span>
+                        </label>
+                        {keepOriginal && (
+                            <div className="mt-3 pl-7">
+                                <label className="block text-xs">
+                                    <div className="flex items-baseline justify-between text-zinc-400 mb-1">
+                                        <span>Original voice volume</span>
+                                        <span className="tabular-nums text-zinc-200">
+                                            {Math.round(originalVolume * 100)}%
+                                        </span>
+                                    </div>
+                                    <input
+                                        type="range"
+                                        min={0.05}
+                                        max={0.7}
+                                        step={0.05}
+                                        value={originalVolume}
+                                        onChange={(e) => setOriginalVolume(+e.target.value)}
+                                        className="w-full accent-green-500"
+                                    />
+                                </label>
+                            </div>
+                        )}
+                    </div>
+                )}
+
+                {/* Voice gender + keep-separate (Edge TTS path) */}
+                {dubProvider === 'edge' && (
+                    <div className="mb-5 grid grid-cols-1 sm:grid-cols-2 gap-3">
+                        <div className="rounded-lg border border-white/10 bg-black/30 p-3">
+                            <label className="text-xs font-bold text-zinc-400 uppercase tracking-wider mb-2 block">Voice gender</label>
+                            <div className="grid grid-cols-3 gap-1.5">
+                                {[
+                                    ['auto', 'Auto'],
+                                    ['male', 'Male'],
+                                    ['female', 'Female'],
+                                ].map(([g, label]) => (
+                                    <button
+                                        key={g}
+                                        type="button"
+                                        onClick={() => setVoiceGender(g)}
+                                        className={
+                                            'px-2 py-1.5 rounded-md text-xs font-medium transition ' +
+                                            (voiceGender === g
+                                                ? 'bg-green-500/15 text-green-300 border border-green-500/40'
+                                                : 'bg-black/30 text-zinc-400 border border-white/5 hover:border-white/15 hover:text-zinc-200')
+                                        }
+                                    >
+                                        {label}
+                                    </button>
+                                ))}
+                            </div>
+                            {voiceGender === 'auto' && (
+                                <p className="mt-2 text-[10px] text-zinc-500 leading-relaxed">
+                                    AI will detect speaker gender from the source audio.
+                                </p>
+                            )}
+                        </div>
+                        <div className="rounded-lg border border-white/10 bg-black/30 p-3 flex items-start gap-2.5 cursor-pointer" onClick={() => setKeepSeparate(!keepSeparate)}>
+                            <input
+                                type="checkbox"
+                                checked={keepSeparate}
+                                onChange={(e) => setKeepSeparate(e.target.checked)}
+                                className="mt-0.5 h-4 w-4 cursor-pointer accent-green-500"
+                                onClick={(e) => e.stopPropagation()}
+                            />
+                            <div className="flex-1 min-w-0">
+                                <div className="text-xs font-bold text-zinc-200">Keep original clip</div>
+                                <div className="text-[11px] text-zinc-500 leading-relaxed mt-0.5">
+                                    {keepSeparate
+                                        ? 'Dubbed version saved as a NEW clip. Original stays untouched.'
+                                        : 'Replace original clip with the dubbed version.'}
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                )}
+
                 {/* Info */}
                 <div className="mb-6 p-3 bg-green-500/10 border border-green-500/20 rounded-lg">
                     <p className="text-xs text-green-400">
-                        The audio will be dubbed with AI-generated voice in the selected language, matching the original speaker's characteristics.
+                        {dubProvider === 'edge' && keepOriginal
+                            ? 'A neural narrator speaks the translation. Your original voice plays underneath.'
+                            : dubProvider === 'edge'
+                                ? 'Free Microsoft neural voice replaces the original audio with the translation.'
+                                : 'ElevenLabs clones your voice and dubs it in the selected language.'}
                     </p>
                 </div>
 
@@ -136,7 +285,7 @@ export default function TranslateModal({ isOpen, onClose, onTranslate, isProcess
                     </button>
                     <button
                         onClick={handleSubmit}
-                        disabled={isProcessing || !hasApiKey}
+                        disabled={isProcessing || (dubProvider === 'elevenlabs' && !hasApiKey)}
                         className="flex-1 py-3 bg-gradient-to-r from-green-500 to-teal-600 hover:from-green-400 hover:to-teal-500 text-white rounded-xl font-bold transition-all disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center gap-2"
                     >
                         {isProcessing ? (

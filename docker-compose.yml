@@ -1,18 +1,188 @@
 services:
   backend:
     build: .
-    container_name: openshorts-backend
+    container_name: klipra-backend
     ports:
       - "8000:8000"
     volumes:
       - .:/app
       - /app/__pycache__
+      # Persist outputs + uploads on the HOST so they survive
+      # `docker compose down` / `--build`. Without these mounts, the
+      # files live inside the container and die on every rebuild —
+      # which was the "my projects auto-deleted" bug.
       - ./output:/app/output
+      - ./uploads:/app/uploads
+      # Accounts SQLite database (users, sessions, influencer apps).
+      # Bind-mounted so signed-up users + applications survive
+      # `docker compose down` / `--build`.
+      - ./data:/app/data
+      # ---- LOCAL-FILE MODE (no upload) ----
+      # When KLIPRA_LOCAL_MODE=1, the dashboard shows a "Use file from
+      # disk" tab that takes a path instead of an upload.
+      #
+      # USAGE (macOS):
+      #   1. Create a folder on your Desktop called "Movies":
+      #        ~/Desktop/Movies
+      #   2. Drop any source video into that folder.
+      #   3. In the dashboard's "Use file from disk" tab paste the
+      #      path AS THE CONTAINER SEES IT — the bind-mount below
+      #      maps ~/Desktop/Movies (your Mac) → /app/local_media
+      #      (inside the container). So a file at
+      #        ~/Desktop/Movies/MyClip.mp4
+      #      becomes
+      #        /app/local_media/MyClip.mp4
+      #
+      # ":ro" = read-only — Klipra can't accidentally modify your
+      # original files. Comment the line out to disable the feature.
+      #   Linux: change to e.g. - /home/$USER/Videos:/app/local_media:ro
+      #   Windows (WSL2): - /mnt/c/Users/<you>/Videos:/app/local_media:ro
+      - ${HOME}/Desktop/Movies:/app/local_media:ro
+      # ---- EXPANDED LOCAL-FILE MODE (opted-in 2026-05-22) ----
+      # The user asked to access videos from anywhere on her Mac without
+      # uploading. We mount the 4 common video locations read-only and
+      # add them all to KLIPRA_LOCAL_MEDIA_ROOTS below. Klipra still
+      # cannot read anything outside these folders — the allowlist is
+      # enforced by _resolve_local_media_path() even after symlink
+      # expansion, so the security model holds.
+      - ${HOME}/Desktop:/app/local_desktop:ro
+      - ${HOME}/Downloads:/app/local_downloads:ro
+      - ${HOME}/Documents:/app/local_documents:ro
+      - ${HOME}/Movies:/app/local_movies:ro
+    environment:
+      # 0 = never auto-delete completed projects. Users now control
+      # deletion via the UI; failed/orphan jobs are still cleaned at
+      # JOB_RETENTION_SECONDS_FAILED.
+      KLIPRA_JOB_RETENTION_SUCCESS_SECONDS: "${KLIPRA_JOB_RETENTION_SUCCESS_SECONDS:-0}"
+      KLIPRA_JOB_RETENTION_FAILED_SECONDS: "${KLIPRA_JOB_RETENTION_FAILED_SECONDS:-21600}"
+      # ---- LOCAL-FILE MODE (no-upload source) ----
+      # 1 = enable the "Use file from disk" tab in the dashboard.
+      # Leave at 0 (or comment out) for any multi-tenant deployment.
+      KLIPRA_LOCAL_MODE: "${KLIPRA_LOCAL_MODE:-1}"
+      # Comma-separated allowlist of root directories the user is
+      # allowed to point at. Any path outside these is 403'd by the
+      # backend, even when LOCAL_MODE is on. Match this to the
+      # bind-mount above.
+      KLIPRA_LOCAL_MEDIA_ROOTS: "${KLIPRA_LOCAL_MEDIA_ROOTS:-/app/local_media,/app/uploads,/app/local_desktop,/app/local_downloads,/app/local_documents,/app/local_movies}"
+      # Maximum file size accepted by both the upload AND local-file
+      # paths. Default 5 GB. Bump if you process longer source videos.
+      KLIPRA_MAX_FILE_SIZE_MB: "${KLIPRA_MAX_FILE_SIZE_MB:-5120}"
+      # ---- WHISPER PERFORMANCE TUNING ----
+      # Docker on macOS canNOT use the M-series GPU (no Metal
+      # passthrough into the Linux VM). Best we can do is push the
+      # CPU side hard. On Linux/Windows with an NVIDIA GPU, set
+      # OPENSHORTS_WHISPER_DEVICE=cuda + COMPUTE_TYPE=float16.
+      #
+      # MAC users: ALSO open Docker Desktop → Settings → Resources
+      # → bump CPUs to your physical core count (e.g. 12 on an M3
+      # Max). Without that the VM is capped at ~half your cores and
+      # the env var below is wasted. Same for Memory — 16+ GB is a
+      # good slot for 64 GB hosts.
+      OPENSHORTS_WHISPER_DEVICE: "${OPENSHORTS_WHISPER_DEVICE:-cpu}"
+      OPENSHORTS_WHISPER_COMPUTE_TYPE: "${OPENSHORTS_WHISPER_COMPUTE_TYPE:-int8}"
+      # Default 0 = let faster-whisper auto-pick (= cpu_count()).
+      # Set to a specific number to override (e.g. 12).
+      OPENSHORTS_WHISPER_CPU_THREADS: "${OPENSHORTS_WHISPER_CPU_THREADS:-0}"
+      # 2 = overlap audio decode with Whisper inference. Costs ~1×
+      # model size in RAM per worker. On 64 GB hosts you can safely
+      # try 3 or 4 if you process multiple videos at a time.
+      OPENSHORTS_WHISPER_NUM_WORKERS: "${OPENSHORTS_WHISPER_NUM_WORKERS:-2}"
+      # ---- 9:16 REFRAME STRATEGY ----
+      # When set to 1, every clip is force-cropped to 9:16 using the
+      # face-tracking pipeline — no scene is ever letterboxed with the
+      # blurred-background fallback. Set this if your content is
+      # always single-speaker (podcasts, rap, talking heads) and you
+      # never want the "horizontal scaled to fit" fallback.
+      # Leave empty for auto-detect (default).
+      OPENSHORTS_FORCE_TRACK: "${OPENSHORTS_FORCE_TRACK:-}"
+      # ---- NATIVE-MAC METAL SIDECAR (optional, ~10-15× faster) ----
+      # When set, Klipra tries this URL first. The sidecar runs
+      # OUTSIDE Docker on the macOS host (because Docker can't access
+      # Metal) and uses the Apple Silicon GPU via mlx-whisper.
+      # If the URL is unreachable, the CPU path above is used instead
+      # — no errors, no failed jobs, just a fallback.
+      #
+      # To enable:
+      #   1. cd whisper_sidecar && ./start.sh
+      #   2. Set this env var before bringing up Klipra:
+      #        export KLIPRA_WHISPER_SIDECAR_URL="http://host.docker.internal:8765"
+      #   3. docker compose up -d
+      #
+      # Leave the default empty to keep the sidecar disabled.
+      KLIPRA_WHISPER_SIDECAR_URL: "${KLIPRA_WHISPER_SIDECAR_URL:-}"
+      # Where to send users after OAuth completes. In dev that's the
+      # Vite dev server; in prod it's your live frontend URL.
+      FRONTEND_URL: "${FRONTEND_URL:-http://localhost:5175}"
+      # PIN the public callback origin. CRITICAL when the backend sits
+      # behind ANY proxy — including the Vite dev server's proxy in
+      # this docker-compose setup. Vite proxies /api with
+      # changeOrigin:true, which rewrites the Host header to
+      # "backend:8000" (Docker's internal hostname), so the backend
+      # would otherwise build redirect_uri=http://backend:8000/...
+      # — but Google has only "http://localhost:8000/..." registered,
+      # producing the classic Error 400: invalid_request.
+      # Default of localhost:8000 matches the dev OAuth client. In
+      # production, set OAUTH_REDIRECT_BASE=https://your.app in your
+      # .env (and register the matching callback URI with Google).
+      OAUTH_REDIRECT_BASE: "${OAUTH_REDIRECT_BASE:-http://localhost:8000}"
+
+      # ---- Social sign-in (Google + GitHub) ----
+      # Both are FREE — register an OAuth app once with each provider
+      # and paste the Client ID + Client Secret here. Until you do,
+      # the buttons in the UI show a "not configured" message.
+      #
+      # Google:  https://console.cloud.google.com → APIs & Services →
+      #          Credentials → Create OAuth client ID (Web application).
+      #          Authorized redirect URI must be exactly:
+      #            http://localhost:8000/api/auth/oauth/google/callback   (dev)
+      #            https://your.app/api/auth/oauth/google/callback        (prod)
+      GOOGLE_CLIENT_ID: "${GOOGLE_CLIENT_ID:-}"
+      GOOGLE_CLIENT_SECRET: "${GOOGLE_CLIENT_SECRET:-}"
+
+      # ---- Welcome email (SMTP) ----
+      # When SMTP_USER + SMTP_PASSWORD are set, every new signup
+      # (password OR Google OAuth) gets a styled HTML welcome email.
+      # Leave them unset and signup keeps working — the send is just
+      # logged as a no-op.
+      #
+      # Gmail setup (free):
+      #   1. Go to https://myaccount.google.com/security and enable
+      #      2-Step Verification.
+      #   2. Then https://myaccount.google.com/apppasswords — create an
+      #      app password named "Klipra". Google shows you a 16-char
+      #      string. Use that as SMTP_PASSWORD (not your normal Gmail
+      #      password — that won't work).
+      #   3. SMTP_USER is the Gmail address.
+      # SendGrid / Mailgun / Resend / AWS SES all also speak SMTP —
+      # follow their docs for the host/port/credentials they want.
+      SMTP_HOST: "${SMTP_HOST:-smtp.gmail.com}"
+      SMTP_PORT: "${SMTP_PORT:-587}"
+      SMTP_USER: "${SMTP_USER:-}"
+      SMTP_PASSWORD: "${SMTP_PASSWORD:-}"
+      SMTP_FROM_NAME: "${SMTP_FROM_NAME:-Klipra}"
+      SMTP_USE_TLS: "${SMTP_USE_TLS:-1}"
+      KLIPRA_BASE_URL: "${KLIPRA_BASE_URL:-http://localhost:5175}"
+      # GitHub:  https://github.com/settings/developers → New OAuth App.
+      #          Authorization callback URL must be exactly:
+      #            http://localhost:8000/api/auth/oauth/github/callback   (dev)
+      #            https://your.app/api/auth/oauth/github/callback        (prod)
+      GITHUB_CLIENT_ID: "${GITHUB_CLIENT_ID:-}"
+      GITHUB_CLIENT_SECRET: "${GITHUB_CLIENT_SECRET:-}"
+
+      # ---- Stripe billing ----
+      # Uncomment + set once you have an account and have created the
+      # Pro / Studio prices in the dashboard.
+      # STRIPE_SECRET_KEY: "${STRIPE_SECRET_KEY:-}"
+      # STRIPE_WEBHOOK_SECRET: "${STRIPE_WEBHOOK_SECRET:-}"
+      # STRIPE_PRICE_PRO: "${STRIPE_PRICE_PRO:-}"
+      # STRIPE_PRICE_STUDIO: "${STRIPE_PRICE_STUDIO:-}"
+      # STRIPE_SUCCESS_URL: "${STRIPE_SUCCESS_URL:-https://your.app/billing/success}"
+      # STRIPE_CANCEL_URL: "${STRIPE_CANCEL_URL:-https://your.app/pricing}"
     restart: unless-stopped
 
   frontend:
     build: ./dashboard
-    container_name: openshorts-frontend
+    container_name: klipra-frontend
     ports:
       - "5175:5173"
     volumes:
@@ -26,7 +196,7 @@ services:
     build:
       context: .
       dockerfile: render-service/Dockerfile
-    container_name: openshorts-renderer
+    container_name: klipra-renderer
     ports:
       - "3100:3100"
     volumes:

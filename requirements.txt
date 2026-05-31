@@ -1,11 +1,21 @@
 scenedetect
 ultralytics
-torch
-torchvision
+# torch / torchvision are installed in the Dockerfile via the PyTorch
+# CPU-only wheel index (--index-url https://download.pytorch.org/whl/cpu)
+# BEFORE this requirements file, so they're already present when pip
+# resolves ultralytics' dependency graph. Why split them out:
+#   - Default torch wheels on aarch64 Linux pull ~2 GB of NVIDIA CUDA
+#     libs (nvidia_cusparse, nvidia_cudnn, nvidia_cublas, ...). These
+#     are useless on Mac (no GPU passthrough in Docker Desktop) and
+#     one of them timing out is what was killing the build.
+#   - The CPU-only wheels are ~200 MB total and have zero CUDA deps.
 tqdm
 yt-dlp
 faster-whisper
 google-genai
+# Additional LLM providers for the multi-provider abstraction (llm/)
+openai
+anthropic
 python-dotenv
 mediapipe==0.10.14
 boto3
@@ -16,3 +26,13 @@ python-multipart
 httpx
 Pillow
 beautifulsoup4
+
+# Free TTS dubbing alternative to ElevenLabs (~no key, no cost).
+# Uses Microsoft Edge's TTS engine via edge-tts.
+edge-tts>=6.1.9
+
+# Account infrastructure: password hashing for user signup / signin.
+bcrypt>=4.0.0
+# Stripe billing for the paid tier. Requires user-provided keys
+# (STRIPE_SECRET_KEY, STRIPE_WEBHOOK_SECRET, STRIPE_PRICE_*) at runtime.
+stripe>=8.0.0

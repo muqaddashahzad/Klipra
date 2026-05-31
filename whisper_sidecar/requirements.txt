@@ -1,0 +1,9 @@
+# mlx-whisper pulls mlx, transformers, ffmpeg-python, and a few others.
+# Pin to a known-good range; bump as upstream releases stabilise.
+mlx-whisper>=0.4.0,<1.0
+fastapi>=0.110
+uvicorn[standard]>=0.27
+python-multipart>=0.0.6
+# requests isn't needed by the server itself, but is handy for ad-hoc
+# probing and manual `curl`-style checks.
+requests>=2.31

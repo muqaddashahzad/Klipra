@@ -32,6 +32,11 @@ def analyze_video_for_titles(api_key, video_path, transcript=None):
             raise Exception("Video processing failed by Gemini.")
         time.sleep(2)
 
+    try:
+        from prompt_rules import USER_TEXT_RULES
+    except ImportError:
+        USER_TEXT_RULES = ""
+
     prompt = f"""You are a YouTube title expert who creates viral, click-worthy titles.
 
 Analyze this video and its transcript, then suggest 10 YouTube titles that would maximize CTR (click-through rate).
@@ -47,6 +52,8 @@ RULES:
 - Include numbers where appropriate
 - Consider the language of the video (detected: {transcript['language']})
 - Titles should be in the SAME LANGUAGE as the video transcript
+
+{USER_TEXT_RULES}
 
 Also provide a brief summary of the video content (2-3 sentences).
 
@@ -120,6 +127,11 @@ def refine_titles(api_key, context, user_message, conversation_history=None):
             role = msg.get("role", "user")
             history_text += f"\n{role.upper()}: {msg['content']}"
 
+    try:
+        from prompt_rules import USER_TEXT_RULES
+    except ImportError:
+        USER_TEXT_RULES = ""
+
     prompt = f"""You are a YouTube title expert. Based on the video context and the user's feedback, suggest 8 new refined YouTube titles.
 
 VIDEO CONTEXT:
@@ -136,6 +148,8 @@ RULES:
 - Keep titles viral and click-worthy
 - If the user asks for a specific style, follow it
 - Titles should be in the same language as the original content
+
+{USER_TEXT_RULES}
 
 OUTPUT JSON:
 {{
@@ -296,6 +310,11 @@ def generate_youtube_description(api_key, title, transcript_segments, language, 
     dur_secs = int(video_duration % 60)
     duration_str = f"{dur_mins}:{dur_secs:02d}"
 
+    try:
+        from prompt_rules import USER_TEXT_RULES
+    except ImportError:
+        USER_TEXT_RULES = ""
+
     prompt = f"""You are a YouTube SEO expert. Generate a complete YouTube video description for the following video.
 
 VIDEO TITLE: "{title}"
@@ -304,6 +323,8 @@ VIDEO DURATION: {duration_str}
 
 TRANSCRIPT WITH TIMESTAMPS:
 {segments_text}
+
+{USER_TEXT_RULES}
 
 REQUIREMENTS:
 1. Write the description in the SAME LANGUAGE as the video ({language})
