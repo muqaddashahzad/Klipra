@@ -7,7 +7,7 @@
 [![Docker](https://img.shields.io/badge/Docker-Ready-2496ED?logo=docker&logoColor=white)](https://docs.docker.com/compose/)
 [![Fork](https://img.shields.io/badge/forked%20from-OpenShorts-blueviolet)](https://github.com/mutonby/openshorts)
 
-Klipra is maintained by **[ilmeaalim.com](https://ilmeaalim.com)** and runs in production at **[klipra.ilmeaalim.com](https://klipra.ilmeaalim.com)**.
+Klipra is maintained by **[ilmeaalim.com](https://www.youtube.com/ilmeaalim)**.
 
 ---
 
