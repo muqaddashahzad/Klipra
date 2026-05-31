@@ -13,7 +13,7 @@ Klipra is maintained by **[ilmeaalim.com](https://www.youtube.com/ilmeaalim)**.
 
 ## Why Klipra and not OpenShorts?
 
-Klipra was forked from OpenShorts in early 2025. Since then it has diverged substantially — most of `app.py`, all of the multimodal Smart Clipper, the keyframed reframer, the AI Motion Graphics engine, the voice-dubbing pipeline and the entire dashboard have been rewritten or added.
+Klipra was forked from OpenShorts in early 2026. Since then it has diverged substantially — most of `app.py`, all of the multimodal Smart Clipper, the keyframed reframer, the AI Motion Graphics engine, the voice-dubbing pipeline and the entire dashboard have been rewritten or added.
 
 The single biggest change: **Klipra runs on free local AI by default**. The original project required a paid Google Gemini key for everything. In Klipra you can pick **[Ollama](https://ollama.com)** as the provider for *every* AI step — clip picking, transcript cleanup, transliteration, motion-graphics planning, dubbing prompts — so the whole pipeline runs offline on your own machine at zero cost.
 
