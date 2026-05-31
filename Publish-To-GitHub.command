@@ -104,20 +104,77 @@ Includes the full Klipra fork on top of OpenShorts:
 fi
 echo ""
 
-# ---------- 4. Push ----------
+# ---------- 4. Fetch what's on GitHub first ----------
 CURRENT_BRANCH="$(git branch --show-current)"
 echo "[push] Branch    : $CURRENT_BRANCH"
 echo "[push] Target    : $TARGET_REPO"
-echo "[push] Attempting push (this may prompt you for GitHub credentials)…"
+echo "[push] Fetching the current state of GitHub…"
+git fetch origin "$CURRENT_BRANCH" 2>&1 | tail -5
 echo ""
 
-if git push -u origin "$CURRENT_BRANCH"; then
-    PUSH_OK=1
-elif git push -u origin "$CURRENT_BRANCH" --force-with-lease; then
-    PUSH_OK=1
+# Compare local vs remote
+REMOTE_COMMIT="$(git rev-parse "origin/$CURRENT_BRANCH" 2>/dev/null || echo "")"
+LOCAL_COMMIT="$(git rev-parse HEAD)"
+
+if [ -z "$REMOTE_COMMIT" ]; then
+    DIVERGENCE="empty"
+elif [ "$REMOTE_COMMIT" = "$LOCAL_COMMIT" ]; then
+    DIVERGENCE="same"
 else
-    PUSH_OK=0
+    AHEAD="$(git rev-list --count "origin/$CURRENT_BRANCH..HEAD" 2>/dev/null || echo "?")"
+    BEHIND="$(git rev-list --count "HEAD..origin/$CURRENT_BRANCH" 2>/dev/null || echo "?")"
+    if [ "$BEHIND" = "0" ]; then
+        DIVERGENCE="ahead"
+    elif [ "$AHEAD" = "0" ]; then
+        DIVERGENCE="behind"
+    else
+        DIVERGENCE="diverged"
+    fi
 fi
+
+case "$DIVERGENCE" in
+    same)
+        echo "[push] Local and remote are already identical. Nothing to push."
+        PUSH_OK=1
+        ;;
+    empty|ahead)
+        echo "[push] Fast-forward push…"
+        if git push -u origin "$CURRENT_BRANCH"; then
+            PUSH_OK=1
+        else
+            PUSH_OK=0
+        fi
+        ;;
+    behind|diverged)
+        echo ""
+        echo "  ⚠️  GitHub has $BEHIND commit(s) that aren't in your local repo."
+        echo "      Your local has $AHEAD commit(s) that aren't on GitHub."
+        echo ""
+        echo "  You told me your local copy is the source of truth, so I'll"
+        echo "  force-push and OVERWRITE whatever is on GitHub right now."
+        echo ""
+        echo "  This is safe because the Klipra repo only has you as a user —"
+        echo "  no one else has cloned it (it's still private)."
+        echo ""
+        echo "  Press ENTER to overwrite GitHub with your local code, or Ctrl-C to abort…"
+        read _confirm
+        echo ""
+        echo "[push] Force-pushing local → GitHub…"
+        if git push -u origin "$CURRENT_BRANCH" --force; then
+            PUSH_OK=1
+        else
+            PUSH_OK=0
+        fi
+        ;;
+    *)
+        echo "[push] Unknown state. Trying a normal push…"
+        if git push -u origin "$CURRENT_BRANCH"; then
+            PUSH_OK=1
+        else
+            PUSH_OK=0
+        fi
+        ;;
+esac
 
 if [ "$PUSH_OK" -ne 1 ]; then
     echo ""
@@ -125,7 +182,8 @@ if [ "$PUSH_OK" -ne 1 ]; then
     echo "  PUSH FAILED"
     echo "============================================================"
     echo ""
-    echo "  This is almost always an auth problem. Two ways to fix it:"
+    echo "  If the error above mentions 'authentication' or 'permission',"
+    echo "  it's a credential problem. Two ways to fix:"
     echo ""
     echo "  Option A — Install GitHub CLI (recommended):"
     echo "    1. Open Terminal"
@@ -139,6 +197,8 @@ if [ "$PUSH_OK" -ne 1 ]; then
     echo "    3. Tick the 'repo' scope, generate it, copy the token"
     echo "    4. Run this script again — when it prompts for username"
     echo "       enter 'muqaddashahzad' and paste the TOKEN as the password"
+    echo ""
+    echo "  Otherwise, copy the error above and send it to your AI agent."
     echo ""
     read -n 1
     exit 1
