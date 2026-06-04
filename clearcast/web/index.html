@@ -1,0 +1,177 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Clearcast — Studio-quality voice from any recording</title>
+<link rel="preconnect" href="https://unpkg.com" />
+<link rel="stylesheet" href="/style.css" />
+</head>
+<body>
+<div class="bg"></div>
+
+<header class="topbar">
+  <div class="brand">
+    <span class="logo" aria-hidden="true">
+      <svg viewBox="0 0 24 24" width="22" height="22"><path d="M12 2a3 3 0 0 0-3 3v6a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3z" fill="currentColor"/><path d="M5 11a7 7 0 0 0 14 0M12 18v3M8 21h8" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
+    </span>
+    <div class="brand-text">
+      <strong>Clearcast</strong>
+      <small>Studio-quality voice from any recording</small>
+    </div>
+  </div>
+  <div class="engines" id="engines" title="Available processing engines"></div>
+</header>
+
+<main class="wrap">
+
+  <!-- ============ UPLOAD ============ -->
+  <section id="view-upload" class="view active">
+    <div class="hero">
+      <h1>Make any recording sound like a <span class="grad">studio podcast</span>.</h1>
+      <p>Drop in noisy, echoey, or music-laden audio <b>or video</b>. Clearcast strips background
+         music, removes noise and reverb with AI, isolates the voice, and masters it to broadcast
+         loudness. Add a whole batch — they're processed one at a time.</p>
+    </div>
+
+    <div id="drop" class="dropzone" tabindex="0" role="button" aria-label="Upload audio or video">
+      <input id="file" type="file" multiple
+             accept="audio/*,video/*,.wav,.mp3,.m4a,.aac,.flac,.ogg,.opus,.aiff,.mp4,.mov,.mkv,.webm" hidden />
+      <div class="drop-inner">
+        <div class="drop-ico">
+          <svg viewBox="0 0 24 24" width="40" height="40"><path d="M12 16V4m0 0 4 4m-4-4-4 4" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/><path d="M20 16v2a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2v-2" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
+        </div>
+        <p class="drop-title">Drag &amp; drop your files</p>
+        <p class="drop-sub">or <span class="link">browse</span> — audio or video, multiple allowed</p>
+        <p class="drop-formats">WAV · MP3 · M4A · FLAC · AAC · OGG · MP4 · MOV · MKV · WEBM</p>
+      </div>
+    </div>
+
+    <ul id="filelist" class="filelist"></ul>
+
+    <div class="options card">
+      <div class="opt-row">
+        <label class="opt">
+          <span class="opt-label">Engine</span>
+          <select id="opt-engine">
+            <option value="studio">Studio AI — best quality (MossFormer2)</option>
+            <option value="fast">Fast AI — quick (DeepFilterNet)</option>
+            <option value="basic">Basic — DSP only</option>
+          </select>
+        </label>
+        <label class="opt">
+          <span class="opt-label">Output</span>
+          <select id="opt-format">
+            <option value="wav">WAV — lossless</option>
+            <option value="mp3">MP3 — 192 kbps</option>
+          </select>
+        </label>
+        <label class="opt">
+          <span class="opt-label">Loudness</span>
+          <select id="opt-lufs">
+            <option value="-16">Podcast −16 LUFS</option>
+            <option value="-14">Streaming −14 LUFS</option>
+            <option value="-19">Spoken −19 LUFS</option>
+            <option value="-23">Broadcast −23 LUFS</option>
+          </select>
+        </label>
+      </div>
+
+      <div class="opt-row">
+        <label class="toggle">
+          <input type="checkbox" id="opt-music" />
+          <span class="track"><span class="thumb"></span></span>
+          <span class="toggle-text">
+            <strong>Remove background music</strong>
+            <small>AI voice/music separation (Demucs) — slower</small>
+          </span>
+        </label>
+      </div>
+
+      <div class="opt-row sliders">
+        <label class="slider">
+          <span class="opt-label">Enhancement strength <b id="val-strength">90%</b></span>
+          <input type="range" id="opt-strength" min="0" max="100" value="90" />
+        </label>
+        <label class="slider">
+          <span class="opt-label">Voice warmth / presence <b id="val-warmth">60%</b></span>
+          <input type="range" id="opt-warmth" min="0" max="100" value="60" />
+        </label>
+      </div>
+    </div>
+
+    <button id="btn-enhance" class="cta" disabled>
+      <span class="cta-label">Select files to enhance</span>
+    </button>
+  </section>
+
+  <!-- ============ BATCH ============ -->
+  <section id="view-batch" class="view">
+    <div class="batch-head">
+      <div>
+        <h2 id="batch-title">Enhancing…</h2>
+        <p id="batch-sub" class="muted">Files are processed one at a time.</p>
+      </div>
+      <div class="batch-progress-wrap">
+        <div class="progress"><div id="batch-bar" class="bar"></div></div>
+        <span id="batch-count" class="muted"></span>
+      </div>
+    </div>
+
+    <ul id="queue" class="queue"></ul>
+
+    <div class="result-actions">
+      <button id="btn-dlall" class="cta" disabled>Download all</button>
+      <button id="btn-new" class="ghost">New batch</button>
+    </div>
+  </section>
+
+</main>
+
+<footer class="foot">
+  <span>Runs 100% locally on your Mac · Demucs · ClearVoice MossFormer2 · DeepFilterNet · ffmpeg</span>
+</footer>
+
+<!-- per-card player template -->
+<template id="tpl-card">
+  <li class="qcard" data-state="queued">
+    <div class="qtop">
+      <span class="qkind" aria-hidden="true"></span>
+      <span class="qname"></span>
+      <span class="qstatus"></span>
+    </div>
+    <div class="qbody">
+      <!-- processing -->
+      <div class="qproc">
+        <div class="progress sm"><div class="bar"></div></div>
+        <p class="qmsg muted"></p>
+      </div>
+      <!-- done -->
+      <div class="qdone">
+        <div class="qbadges"></div>
+        <div class="wave"></div>
+        <div class="transport">
+          <button class="play" title="Play / pause"><svg viewBox="0 0 24 24" width="20" height="20"><path class="play-ico" d="M8 5v14l11-7z" fill="currentColor"/></svg></button>
+          <span class="time">0:00 / 0:00</span>
+          <label class="ab-switch" title="Compare enhanced vs original">
+            <span class="ab-lbl ab-off">Original</span>
+            <input type="checkbox" class="ab-input" checked hidden />
+            <span class="track"><span class="thumb"></span></span>
+            <span class="ab-lbl ab-on">Enhanced</span>
+          </label>
+          <span class="dls">
+            <a class="btn-dl dl-audio" href="#">⬇ Audio</a>
+            <a class="btn-dl dl-video" href="#" hidden>⬇ Video</a>
+          </span>
+        </div>
+      </div>
+      <!-- error -->
+      <p class="qerror"></p>
+    </div>
+  </li>
+</template>
+
+<script src="https://unpkg.com/wavesurfer.js@7"></script>
+<script src="/app.js"></script>
+</body>
+</html>

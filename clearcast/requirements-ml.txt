@@ -1,0 +1,9 @@
+# Clearcast AI engines (PyPI only). Install with:
+#   uv pip install --python .venv -r requirements-ml.txt
+torch>=2.2
+torchaudio>=2.2
+demucs>=4.0
+clearvoice>=0.1.2
+deepfilternet>=0.5.6
+nara_wpe>=0.0.9
+scipy>=1.10

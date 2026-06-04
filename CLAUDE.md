@@ -188,17 +188,78 @@ Past-project metadata lives at `output/{job_id}/metadata.json`. The rehydrator i
 
 ## Recent task history
 
-The full per-task history has 188+ entries spanning auto-subtitle 3-phase restructure, Smart Clipper Fast + Pro builds, Smart Clipper face-tracking, keyframed reframe, BYOL (Bring Your Own Lyrics) for songs, Hinglish/Roman Urdu source-language support, AI Magic Overlays, per-clip motion graphics, voice-dub + add-subtitles-after-dub combo, viral-hook emoji rendering, fullscreen-crop CSS fix, font fallback map, Dockerfile fonts (Symbola + Noto Color Emoji), Whisper Metal sidecar, daily Gemini quota detection + resume, content-based upload dedup, account auth + OAuth, welcome email, S3 backup, 5 GB upload limit, local-file mode.
+The full per-task history has 247+ entries. Earlier work spans auto-subtitle 3-phase restructure, Smart Clipper Fast + Pro builds, Smart Clipper face-tracking, keyframed reframe, BYOL (Bring Your Own Lyrics) for songs, Hinglish/Roman Urdu source-language support, AI Magic Overlays, per-clip motion graphics, voice-dub + add-subtitles-after-dub combo, viral-hook emoji rendering, fullscreen-crop CSS fix, font fallback map, Dockerfile fonts (Symbola + Noto Color Emoji), Whisper Metal sidecar, daily Gemini quota detection + resume, content-based upload dedup, account auth + OAuth, welcome email, S3 backup, 5 GB upload limit, local-file mode.
 
-Two known pending items:
+**Recent additions (May-June 2026, tasks #189-#247):**
+- **GitHub public release** — repo is now at `github.com/muqaddashahzad/Klipra` under MIT, with a README rewritten from "OpenShorts" branding to "Klipra" branding.
+- **EditModal redesign** — pro-NLE modal with gradient surface, frosted header/footer, region cards, motion + colour preset cards with gradient fills, segmented tab control, friendly-error helper that summarises raw FFmpeg dumps.
+- **RetrimModal v3-v5** — visual scrubber with audio waveform, zoom, playback speed, mark IN / mark OUT, draggable handles, undo, localStorage persistence, modern gradient styling.
+- **ReframeKeyframeModal** — playable preview with audio, transport bar, modern gradient styling, **mouse-mode toggle (Keyframe vs Playback)** that prevents clicks from accidentally toggling playback.
+- **AI Avatar tab** — UI placeholder for talking-head generation (photo + audio → lipsynced video). Listed in nav. Engines currently stubbed because LongCat-Video-Avatar is CUDA-only; will wire up SadTalker / MuseTalk when ready. Component: `dashboard/src/components/AIAvatar.jsx`.
+- **Switch AI & resume** — `/api/retry/{job_id}` now accepts `X-LLM-Provider`, `X-LLM-Model`, `X-LLM-Key`, `X-LLM-Base-URL` headers. When provided, the resumed run overrides the original provider. Frontend `ResumePanel` (in App.jsx) shows two buttons on the failed-job pane: "♻️ Resume from checkpoint" (original) and "🔄 Switch AI & resume" (with inline provider+model picker that auto-detects installed Ollama models).
+- **Ollama uniform-length retry** — when Ollama picker returns clips that are all within ~5 seconds of each other, main.py now retries with a counter-example prompt to encourage diverse durations.
+- **Ollama timeouts + retries** — `OllamaProvider` now has retry-with-backoff on connect/read timeouts, smaller batches for transliteration, `keep_alive` at top level (not inside `options`), and a `KLIPRA_OLLAMA_TIMEOUT` env knob.
+- **Roman/Hinglish/Urglish improvements** — per-segment retry for any segment the LLM returned in non-Latin script; tighter prompts; inline language picker in Subtitle Step 2.
+- **Letterboxing fix** — TRACK vs GENERAL thresholds in `main.py:analyze_scenes_strategy()` tightened (sample 5 frames, avg<0.2 for GENERAL, avg>=2.0 AND max>=2 for group); `OPENSHORTS_FORCE_TRACK=1` env override forces TRACK on all scenes.
+- **Hook emoji fallback** — `hooks.py:_load_all_emoji_fonts()` tries every available emoji font per-glyph; silently drops emojis that no font has rather than showing tofu.
+- **FFmpeg 4.x compatibility** — `timeline_effects.py:_zoom_scale_crop()` replaces the `crop=...:eval=frame` pattern with scale-then-static-crop, so zoom-punch / slow-pan work on FFmpeg 4.x.
+- **Publish-To-GitHub.command** — one-click script that re-points origin, runs a safety check (ensures `.env`, `data/`, and `*.db` are excluded), commits, and pushes. Handles divergence with force-push prompt.
+
+Known pending items:
 - **Pro picker scoring rubric** — Fast picker has the per-signal rubric; Pro picker's stage-4 `score_windows()` should adopt it too (multi-window-aware).
 - **EditModal color-effect preview** — missing parity with the older edit flow.
+- **AI Avatar backend** — engine wrappers (SadTalker / MuseTalk) not wired up. UI is ready, just needs a sidecar or in-container engine.
+- **Production homepage audit** — smoke-test deployment at klipra.ilmeaalim.com after recent changes.
+
+## Hermes-as-hands workflow
+
+Muqaddas runs the **Hermes Agent** (from Nous Research, `hermes-agent.nousresearch.com`) on her Mac. It's an MCP-capable agent that uses her xAI OAuth to call Grok. It has a `hermes` CLI binary and can execute shell commands on her Mac.
+
+When an AI agent (Claude, Cursor, etc) running inside a sandbox needs to:
+- restart Docker
+- check logs
+- run `curl` against a localhost endpoint
+- copy files
+- diagnose mount issues
+
+...it cannot do those things directly. Instead, the agent writes a **Hermes prompt** in a clearly delimited block. Muqaddas copies the block into her Hermes window, Hermes executes the steps, Muqaddas copies the raw output back to the AI. Two clicks per round-trip instead of 20.
+
+Conventions for Hermes prompts (followed by all AI agents in this repo):
+1. Start with `═══` separators so the block is easy to spot in chat.
+2. Always specify the working directory explicitly (`cd /Volumes/Data/AntiGravity/Klipra`).
+3. Ask Hermes to paste **raw stdout/stderr** of each step, never paraphrased summaries.
+4. Number the steps.
+5. NEVER use Hermes for irreversible operations (delete, force-push, drop database) — those route through Muqaddas with confirmation.
+6. Avoid passing secrets through Hermes.
+
+Example:
+```
+═══════════════════════════════════════════════════
+HERMES PROMPT — paste verbatim
+═══════════════════════════════════════════════════
+1. cd /Volumes/Data/AntiGravity/Klipra
+2. docker compose restart backend
+3. sleep 15
+4. curl -s http://localhost:8000/api/providers | jq '.[] | select(.id=="ollama")'
+
+Paste raw stdout/stderr of each step. Do not summarise.
+═══════════════════════════════════════════════════
+```
 
 ## Where this repo lives
 
-- **Local (your Mac):** `/Volumes/Data/AntiGravity/Klipra` (after the migration script ran). Before that it lived at `~/Library/Application Support/Claude/local-agent-mode-sessions/.../outputs/openshorts-fork` — older AI-session traces may still reference that path.
+- **GitHub (public):** [https://github.com/muqaddashahzad/Klipra](https://github.com/muqaddashahzad/Klipra) — MIT licensed, public since June 2026. Clone with `git clone https://github.com/muqaddashahzad/Klipra.git`. Anyone can install locally; see the README for `docker compose up -d` instructions.
+- **Local (Muqaddas' Mac):** `/Volumes/Data/AntiGravity/Klipra` (after the migration script ran). Before that it lived at `~/Library/Application Support/Claude/local-agent-mode-sessions/.../outputs/openshorts-fork` — older AI-session traces may still reference that path.
 - **Production:** Hetzner VPS 46.62.194.70, deployed via Plesk, behind Cloudflare DNS (klipra.ilmeaalim.com → A record points to the VPS).
 - **Google OAuth client:** Klipra-494810 GCP project. Production redirect URI is wired for klipra.ilmeaalim.com.
+
+### Pushing changes to GitHub
+The git remote `origin` is set to `https://github.com/muqaddashahzad/Klipra.git`. Muqaddas has credentials cached in macOS Keychain from previous pushes. To deploy a local change:
+1. From the repo root, `git add -A && git commit -m "..." && git pull --rebase origin main && git push origin main`.
+2. If a regular push is rejected because remote has commits local doesn't (e.g. README edits made via GitHub web UI), `git pull --rebase origin main` then push.
+3. The one-click script `Publish-To-GitHub.command` automates this; double-click it in Finder.
+
+Because the sandbox AI agents (like Claude in Cowork) cannot reach GitHub directly, agents either ask Muqaddas to run the push commands or relay them through the Hermes Agent (see below).
 
 ## Tech stack snapshot
 

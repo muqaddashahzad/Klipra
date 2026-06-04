@@ -3016,7 +3016,13 @@ async def get_status(job_id: str):
 
 
 @app.post("/api/retry/{job_id}")
-async def retry_job(job_id: str):
+async def retry_job(
+    job_id: str,
+    x_llm_provider: Optional[str] = Header(None, alias="X-LLM-Provider"),
+    x_llm_model: Optional[str] = Header(None, alias="X-LLM-Model"),
+    x_llm_key: Optional[str] = Header(None, alias="X-LLM-Key"),
+    x_llm_base_url: Optional[str] = Header(None, alias="X-LLM-Base-URL"),
+):
     """Re-run a failed clip-generation job, reusing on-disk checkpoints.
 
     main.py now writes `<title>_clips_checkpoint.json` as soon as the
@@ -3033,6 +3039,14 @@ async def retry_job(job_id: str):
         path so resume still works.
       • Job folder doesn't exist anywhere — return 404 with a clear
         explanation so the user knows to re-upload.
+
+    SWITCH-AI override:
+        Callers may pass X-LLM-Provider / X-LLM-Model / X-LLM-Key /
+        X-LLM-Base-URL headers to swap the AI provider used by the
+        resumed run — useful when Gemini hits a daily quota and the
+        user wants to finish the job on free Ollama instead. The
+        on-disk transcript + clip checkpoints survive, so only the
+        steps that still need an LLM run against the new provider.
     """
     job = jobs.get(job_id)
     job_dir = os.path.join(OUTPUT_DIR, job_id)
@@ -3094,6 +3108,36 @@ async def retry_job(job_id: str):
             f"main.py will skip steps whose checkpoints already exist on disk."
         ]
         job["result"] = None
+
+    # ---------- SWITCH-AI override --------------------------------------
+    # If the caller provided new provider/model/key headers, patch the
+    # job's env dict in place so the resumed subprocess picks them up.
+    # We log the swap clearly so the user sees it in the live log feed.
+    if x_llm_provider or x_llm_model or x_llm_key or x_llm_base_url:
+        target = jobs[job_id]
+        env = target.get("env") or os.environ.copy()
+        old_prov = env.get("OPENSHORTS_LLM_PROVIDER", "")
+        old_model = env.get("OPENSHORTS_LLM_MODEL", "")
+        if x_llm_provider:
+            env["OPENSHORTS_LLM_PROVIDER"] = x_llm_provider
+        if x_llm_model:
+            env["OPENSHORTS_LLM_MODEL"] = x_llm_model
+        if x_llm_key is not None:
+            # Allow empty string for Ollama (no key needed).
+            env["OPENSHORTS_LLM_KEY"] = x_llm_key
+            # Mirror into the legacy Gemini env var so older code paths
+            # (hooks.py, thumbnail.py, saasshorts.py) see a fresh key.
+            if (x_llm_provider or env.get("OPENSHORTS_LLM_PROVIDER")) == "gemini" and x_llm_key:
+                env["GEMINI_API_KEY"] = x_llm_key
+        if x_llm_base_url:
+            env["OPENSHORTS_LLM_BASE_URL"] = x_llm_base_url
+        target["env"] = env
+        new_prov = env.get("OPENSHORTS_LLM_PROVIDER", "")
+        new_model = env.get("OPENSHORTS_LLM_MODEL", "")
+        target.setdefault("logs", []).append(
+            f"🔄 AI provider switched for resume: "
+            f"{old_prov}/{old_model} → {new_prov}/{new_model}"
+        )
 
     await job_queue.put(job_id)
     return {"job_id": job_id, "status": "queued", "retry": True}

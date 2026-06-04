@@ -48,6 +48,13 @@ skills-lock.json
 # Whisper sidecar virtual environment (large, locally built)
 whisper_sidecar/.venv/
 
+# Audio-cleaning engine (Clearcast) — local venv, downloaded models, job outputs
+clearcast/.venv/
+clearcast/checkpoints/
+clearcast/jobs/
+clearcast/bin/
+clearcast/setup_heavy.log
+
 # Debug dumps
 whisper_dump.txt
 *.dump
@@ -58,5 +65,7 @@ whisper_dump.txt
 !dashboard/public/samples/subtitled-italian.mp4
 !dashboard/public/samples/dub-french.mp4
 !dashboard/public/samples/dub-german.mp4
+!dashboard/public/samples/audio-cleaning-sample.mp4
+!dashboard/public/samples/audio-cleaning-sample-enhanced.mp4
 # Note: source-original.mp4 is intentionally NOT whitelisted because
 # it exceeds GitHub's 100 MB file limit. See README for download URL.

@@ -39,7 +39,14 @@ export default defineConfig({
       '/render': {
         target: 'http://renderer:3100',
         changeOrigin: true,
-      }
+      },
+      // Audio Cleaning sidecar (Clearcast) runs on the macOS host at :8770,
+      // mirroring Klipra's whisper_sidecar pattern. Strip the /clearcast prefix.
+      '/clearcast': {
+        target: 'http://host.docker.internal:8770',
+        changeOrigin: true,
+        rewrite: (p) => p.replace(/^\/clearcast/, ''),
+      },
     }
   }
 })

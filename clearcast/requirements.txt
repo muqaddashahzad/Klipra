@@ -1,0 +1,13 @@
+# Clearcast — server (light) deps
+fastapi
+uvicorn[standard]
+python-multipart
+soundfile
+numpy
+requests
+
+# Heavy ML engines (installed by setup.sh, large downloads):
+#   torch torchaudio          # ~ hundreds of MB (CPU/MPS arm64 build)
+#   clearvoice                # MossFormer2_SE_48K studio denoise/restore (~ few hundred MB models)
+#   demucs                    # htdemucs music/vocal separation (~80 MB model)
+# Plus the DeepFilterNet `deep-filter` arm64 binary downloaded into ./bin

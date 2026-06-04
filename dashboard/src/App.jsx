@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { Upload, FileVideo, Sparkles, Youtube, Instagram, Share2, LogOut, ChevronDown, Check, Activity, LayoutDashboard, Settings, PlusCircle, History, Menu, X, Terminal, Shield, LayoutGrid, Image, Globe, RotateCcw, Calendar, Trash2, Tag, Info, Type, Languages, Brain, Film } from 'lucide-react';
+import { Upload, FileVideo, Sparkles, Youtube, Instagram, Share2, LogOut, ChevronDown, Check, Activity, LayoutDashboard, Settings, PlusCircle, History, Menu, X, Terminal, Shield, LayoutGrid, Image, Globe, RotateCcw, Calendar, Trash2, Tag, Info, Type, Languages, Brain, Film, UserCircle2, Wand2 } from 'lucide-react';
 import KeyInput from './components/KeyInput';
 import ProviderPicker from './components/ProviderPicker';
 import MediaInput from './components/MediaInput';
@@ -9,8 +9,10 @@ import Pricing from './components/Pricing';
 import About from './components/About';
 import StandaloneDub from './components/StandaloneDub';
 import StandaloneSubtitle from './components/StandaloneSubtitle';
+import StandaloneAudioClean from './components/StandaloneAudioClean';
 import SmartClipper from './components/SmartClipper';
 import HorizontalToVertical from './components/HorizontalToVertical';
+import AIAvatar from './components/AIAvatar';
 import KlipraLogo from './components/KlipraLogo';
 import ProcessingAnimation from './components/ProcessingAnimation';
 import AuthModal from './components/AuthModal';
@@ -225,6 +227,7 @@ function App() {
     dashboard: 0,
     subtitle: 0,
     dub: 0,
+    audioclean: 0,
   });
   const goHomeOfTab = (id) => {
     setActiveTab(id);
@@ -748,6 +751,8 @@ function App() {
       { id: 'h2v',       label: 'Horizontal → Vertical',icon: Film,     accentText: 'text-fuchsia-300',accentBg: 'bg-fuchsia-500/10' },
       { id: 'subtitle',  label: 'Auto Subtitle',        icon: Type,     accentText: 'text-orange-300',  accentBg: 'bg-orange-500/10' },
       { id: 'dub',       label: 'Voice Dubbing',        icon: Languages, accentText: 'text-emerald-300', accentBg: 'bg-emerald-500/10' },
+      { id: 'audioclean',label: 'Audio Cleaning',       icon: Wand2,    accentText: 'text-sky-300',     accentBg: 'bg-sky-500/10' },
+      { id: 'avatar',    label: 'AI Avatar',            icon: UserCircle2, accentText: 'text-violet-300', accentBg: 'bg-violet-500/10', badge: 'Preview' },
     ];
     return (
     <header className="h-14 sm:h-16 border-b border-border bg-surface/80 backdrop-blur-md flex items-center justify-between px-3 sm:px-5 shrink-0 z-20 relative">
@@ -1271,6 +1276,11 @@ function App() {
             return <StandaloneDub llmHeaders={llmHeaders} elevenLabsKey={elevenLabsKey} homeBump={tabHomeBump.dub} />;
           })()}
 
+          {/* View: Audio Cleaning (Adobe-Podcast-style noise/music removal) */}
+          {activeTab === 'audioclean' && (
+            <StandaloneAudioClean homeBump={tabHomeBump.audioclean} />
+          )}
+
           {/* View: Smart Clipper (multimodal viral-moment picker) */}
           {activeTab === 'smartclip' && (
             <SmartClipper
@@ -1295,6 +1305,17 @@ function App() {
               setApiKey={setApiKey}
               elevenLabsKey={elevenLabsKey}
               onBack={() => setActiveTab('home')}
+            />
+          )}
+
+          {/* View: AI Avatar — talking-head from photo + audio.
+              UI placeholder for now. Reference model LongCat-Video-
+              Avatar is CUDA-only; this tab gives users the input
+              flow while we wait for a Mac-compatible engine. */}
+          {activeTab === 'avatar' && (
+            <AIAvatar
+              currentUser={currentUser}
+              onChooseTab={setActiveTab}
             />
           )}
 
@@ -1526,37 +1547,13 @@ function App() {
                         <p className="text-sm">Waiting for clips...</p>
                       </div>
                     ) : status === 'error' ? (
-                      <div className="h-full flex flex-col items-center justify-center text-red-400 space-y-3 px-6 text-center">
-                        <p className="font-bold">Generation failed.</p>
-                        <p className="text-[12px] text-zinc-400 max-w-md">
-                          Already-finished steps (transcript, clip picks, rendered clips) are checkpointed on disk. Hit Resume to pick up where the previous attempt stopped — usually it just re-runs the failing step.
-                        </p>
-                        <button
-                          type="button"
-                          disabled={!jobId}
-                          onClick={async () => {
-                            if (!jobId) return;
-                            try {
-                              const r = await fetch(getApiUrl(`/api/retry/${jobId}`), {
-                                method: 'POST',
-                                headers: { 'Content-Type': 'application/json' },
-                              });
-                              if (!r.ok) {
-                                const t = await r.text();
-                                setLogs(prev => [...prev, `Resume failed: ${t}`]);
-                                return;
-                              }
-                              setLogs(prev => [...prev, '♻️ Resume queued — re-running with on-disk checkpoints…']);
-                              setStatus('processing');
-                            } catch (e) {
-                              setLogs(prev => [...prev, `Resume error: ${e.message || e}`]);
-                            }
-                          }}
-                          className="mt-2 px-4 py-2 rounded-md bg-amber-500 hover:bg-amber-400 text-black text-[12px] font-bold inline-flex items-center gap-1.5 disabled:opacity-40 disabled:cursor-not-allowed"
-                        >
-                          ♻️ Resume from checkpoint
-                        </button>
-                      </div>
+                      <ResumePanel
+                        jobId={jobId}
+                        llmConfig={llmConfig}
+                        apiKey={apiKey}
+                        onLog={(line) => setLogs(prev => [...prev, line])}
+                        onResumed={() => setStatus('processing')}
+                      />
                     ) : null
                   )}
                 </div>
@@ -1738,6 +1735,216 @@ function ActiveProviderBadge() {
       <span className="text-zinc-500">/</span>
       <span>{info.model}</span>
       {!ok && <span className="text-yellow-400">· no key set</span>}
+    </div>
+  );
+}
+
+/**
+ * ResumePanel — shown on the right-hand "Generated Shorts" pane when a
+ * clip-generation job has failed.
+ *
+ * Gives the user TWO options instead of one:
+ *
+ *   1. Resume from checkpoint   — re-runs with the ORIGINAL provider
+ *      (this is the historical behaviour; useful when the failure was
+ *      transient e.g. flaky network).
+ *
+ *   2. Switch AI & resume       — opens a small inline picker showing
+ *      every installed Ollama model + a few hosted provider options.
+ *      Picking one + clicking the gradient button calls /api/retry with
+ *      X-LLM-Provider / X-LLM-Model / X-LLM-Key headers, so the resumed
+ *      subprocess uses the new AI without losing the existing on-disk
+ *      transcript / clip-pick checkpoints.
+ *
+ * Built specifically because Gemini's free tier hits a daily 20-request
+ * quota mid-job and forces an "import everything from scratch" cycle
+ * unless we can swap to free Ollama mid-stream.
+ */
+function ResumePanel({ jobId, llmConfig, apiKey, onLog, onResumed }) {
+  const [showPicker, setShowPicker] = React.useState(false);
+  const [provider, setProvider] = React.useState(() => llmConfig?.provider || 'ollama');
+  const [model, setModel] = React.useState(() => llmConfig?.model || '');
+  const [ollamaModels, setOllamaModels] = React.useState([]);
+  const [busy, setBusy] = React.useState(false);
+
+  // Pull live installed Ollama models — same endpoint the picker uses.
+  // /api/providers returns an array of {id, name, models, ...}. Find
+  // the Ollama entry and read its models (which the backend has
+  // already populated with the LIVE list from the local daemon).
+  React.useEffect(() => {
+    if (!showPicker) return;
+    let cancelled = false;
+    (async () => {
+      try {
+        const r = await fetch(getApiUrl('/api/providers?refresh=1'));
+        if (!r.ok) return;
+        const j = await r.json();
+        if (cancelled) return;
+        const arr = Array.isArray(j) ? j : (j?.providers || []);
+        const ollama = arr.find((p) => p?.id === 'ollama');
+        const list = Array.isArray(ollama?.models)
+          ? ollama.models.map((m) => (typeof m === 'string' ? m : m?.name || m?.id || ''))
+              .filter(Boolean)
+          : [];
+        setOllamaModels(list);
+        if (provider === 'ollama' && !model && list.length) {
+          const preferred = list.find((m) => /14b|13b|8b|7b/i.test(m)) || list[0];
+          setModel(preferred);
+        }
+      } catch (_) {}
+    })();
+    return () => { cancelled = true; };
+  }, [showPicker, model, provider]);
+
+  function decryptedKeyFor(prov) {
+    try {
+      const raw = localStorage.getItem(`os_llm_key_${prov}`);
+      if (!raw) return '';
+      const SALT = 'openshorts-llm-v1';
+      const decoded = atob(raw);
+      let out = '';
+      for (let i = 0; i < decoded.length; i++) out += String.fromCharCode(decoded.charCodeAt(i) ^ SALT.charCodeAt(i % SALT.length));
+      return out;
+    } catch (_) { return ''; }
+  }
+
+  async function doResume(override) {
+    if (!jobId || busy) return;
+    setBusy(true);
+    try {
+      const headers = { 'Content-Type': 'application/json' };
+      if (override) {
+        headers['X-LLM-Provider'] = override.provider || '';
+        if (override.model) headers['X-LLM-Model'] = override.model;
+        headers['X-LLM-Key'] = override.key || '';
+      }
+      const r = await fetch(getApiUrl(`/api/retry/${jobId}`), {
+        method: 'POST',
+        headers,
+      });
+      if (!r.ok) {
+        const t = await r.text();
+        onLog?.(`Resume failed: ${t}`);
+        setBusy(false);
+        return;
+      }
+      onLog?.(
+        override
+          ? `🔄 Resume queued with ${override.provider}${override.model ? '/' + override.model : ''} — on-disk checkpoints preserved.`
+          : '♻️ Resume queued — re-running with on-disk checkpoints…'
+      );
+      onResumed?.();
+    } catch (e) {
+      onLog?.(`Resume error: ${e.message || e}`);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <div className="h-full flex flex-col items-center justify-center text-red-400 space-y-3 px-6 text-center">
+      <p className="font-bold">Generation failed.</p>
+      <p className="text-[12px] text-zinc-400 max-w-md">
+        Already-finished steps (transcript, clip picks, rendered clips) are checkpointed on disk.
+        Hit Resume to pick up where the previous attempt stopped — usually it just re-runs the failing step.
+      </p>
+
+      <div className="flex flex-wrap items-center justify-center gap-2 mt-2">
+        <button
+          type="button"
+          disabled={!jobId || busy}
+          onClick={() => doResume(null)}
+          className="px-4 py-2 rounded-md bg-amber-500 hover:bg-amber-400 text-black text-[12px] font-bold inline-flex items-center gap-1.5 disabled:opacity-40 disabled:cursor-not-allowed"
+        >
+          ♻️ Resume from checkpoint
+        </button>
+        <button
+          type="button"
+          disabled={!jobId || busy}
+          onClick={() => setShowPicker((v) => !v)}
+          className={
+            'px-4 py-2 rounded-md text-[12px] font-bold inline-flex items-center gap-1.5 transition disabled:opacity-40 disabled:cursor-not-allowed ' +
+            (showPicker
+              ? 'bg-gradient-to-r from-violet-500 to-fuchsia-500 text-white shadow-[0_6px_22px_-6px_rgba(168,85,247,0.6)]'
+              : 'bg-zinc-800 hover:bg-zinc-700 text-zinc-100 ring-1 ring-white/10')
+          }
+        >
+          🔄 Switch AI &amp; resume
+        </button>
+      </div>
+
+      {/* Helpful one-liner about Gemini quota — the most common reason
+          someone reaches this panel. Always shown so the picker doesn't
+          feel cryptic. */}
+      <p className="text-[11px] text-zinc-500 max-w-md">
+        Out of Gemini quota for today? Pick a local Ollama model below — it's free, runs offline, and inherits your transcript checkpoint.
+      </p>
+
+      {showPicker && (
+        <div className="w-full max-w-md mt-2 rounded-2xl ring-1 ring-violet-400/30 bg-gradient-to-b from-zinc-900/90 to-zinc-950/95 backdrop-blur-md p-4 text-left shadow-[0_24px_60px_-20px_rgba(168,85,247,0.45)]">
+          <p className="text-[11px] uppercase tracking-wider text-violet-300 mb-2">Pick a different AI for the resume</p>
+
+          <label className="block text-[11px] text-zinc-400 mb-1">Provider</label>
+          <select
+            value={provider}
+            onChange={(e) => {
+              const np = e.target.value;
+              setProvider(np);
+              // Reset model to a sensible default per provider.
+              if (np === 'ollama') {
+                const preferred = ollamaModels.find((m) => /14b|13b|8b|7b/i.test(m)) || ollamaModels[0] || '';
+                setModel(preferred);
+              } else if (np === 'gemini') setModel('gemini-2.5-flash');
+              else if (np === 'openai') setModel('gpt-4o-mini');
+            }}
+            className="w-full bg-zinc-900/80 ring-1 ring-white/10 rounded-lg px-2 py-1.5 text-[12px] text-white mb-3"
+          >
+            <option value="ollama">Ollama (free, local)</option>
+            <option value="gemini">Gemini</option>
+            <option value="openai">OpenAI</option>
+          </select>
+
+          <label className="block text-[11px] text-zinc-400 mb-1">Model</label>
+          {provider === 'ollama' && ollamaModels.length > 0 ? (
+            <select
+              value={model}
+              onChange={(e) => setModel(e.target.value)}
+              className="w-full bg-zinc-900/80 ring-1 ring-white/10 rounded-lg px-2 py-1.5 text-[12px] text-white mb-3"
+            >
+              {ollamaModels.map((m) => <option key={m} value={m}>{m}</option>)}
+            </select>
+          ) : (
+            <input
+              type="text"
+              value={model}
+              onChange={(e) => setModel(e.target.value)}
+              placeholder={provider === 'ollama' ? 'e.g. qwen2.5:14b-instruct' : provider === 'openai' ? 'e.g. gpt-4o-mini' : 'e.g. gemini-2.5-flash'}
+              className="w-full bg-zinc-900/80 ring-1 ring-white/10 rounded-lg px-2 py-1.5 text-[12px] text-white mb-3"
+            />
+          )}
+
+          {provider === 'ollama' && ollamaModels.length === 0 && (
+            <p className="text-[11px] text-amber-300 -mt-2 mb-2">
+              No Ollama models detected. Start the Ollama app and `ollama pull qwen2.5:14b-instruct`, then re-open this picker.
+            </p>
+          )}
+
+          <button
+            type="button"
+            disabled={!model || busy}
+            onClick={() => {
+              const k = provider === 'ollama' ? '' : (decryptedKeyFor(provider) || apiKey || '');
+              doResume({ provider, model, key: k });
+            }}
+            className="w-full mt-1 rounded-lg bg-gradient-to-r from-violet-500 via-fuchsia-500 to-pink-500 text-white text-[12.5px] font-semibold py-2 hover:opacity-95 transition shadow-[0_8px_24px_-8px_rgba(217,70,239,0.55)] disabled:opacity-50 disabled:cursor-not-allowed"
+          >
+            {busy ? 'Queuing…' : `Resume with ${provider}${model ? ' / ' + model : ''}`}
+          </button>
+          <p className="text-[10.5px] text-zinc-500 mt-2 leading-snug">
+            Your transcript and any already-rendered clips stay. Only the steps that still need an AI run on the new provider.
+          </p>
+        </div>
+      )}
     </div>
   );
 }
