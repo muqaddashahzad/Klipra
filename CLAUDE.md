@@ -8,17 +8,13 @@ This file is the **entry point** for any AI agent (Claude Code, Cursor, etc.) wo
 
 The codebase was forked from the open-source `openshorts` project, but has diverged substantially. Treat the README.md and any "OpenShorts" references as legacy — the product is Klipra.
 
-### Five user-facing products
+### Four user-facing products
 
 1. **Generate Viral Clips** (full pipeline) — Drop a YouTube URL or video file; Klipra transcribes, picks the best 4–8 viral moments, cuts them, reframes 16:9 → 9:16 with face tracking, burns subtitles, adds viral hook overlays, and optionally posts to TikTok/Instagram/YouTube. Code lives in `main.py` + `app.py`.
 
 2. **AI Audio Cleaning** (`StandaloneAudioClean.jsx`, `clearcast/`) — Adobe Podcast Enhance, self-hosted and open-source. Upload audio or video; the engine auto-diagnoses every problem (noise, reverb, hum, clipping, sibilance) and applies targeted fixes step by step: WPE de-reverb → MossFormer2 voice restoration (ClearVoice) → DeepFilterNet polish → professional mastering to −16 LUFS. Outputs 24-bit/48 kHz WAV or MP3; video files get the clean audio re-muxed back in. Runs as its own Docker service (`clearcast/`, port 8770) so it never interferes with the main backend. Measured noise floor: −81 dB (vs Adobe's −58 dB). Code: `clearcast/backend/pipeline.py`, `clearcast/backend/analyze.py`, `clearcast/backend/engines/`.
 
-3. **Smart Clipper** (`SmartClipper.jsx`, `multimodal_picker.py`, `smart_clipper_pro.py`) — A multimodal-VLM-driven picker that watches the video frame-by-frame in addition to reading the transcript. Has two modes:
-   - **Fast** — Single-pass picker with a per-signal scoring rubric (punchline, reversal, awkward_pause, one_liner, audio_peak, visual_energy).
-   - **Pro** — 5-stage pipeline (transcribe → translate → per-frame visual analysis → window scoring → greedy selection) with sentence-boundary snapping and multi-size candidate windows.
-
-4. **Standalone Subtitle** (`StandaloneSubtitle.jsx`) — Just subtitles, no clip generation. Three-phase flow: Phase 1 (transcribe + reframe), Phase 2 (style + animations + lyrics align), Phase 3 (burn).
+3. **Standalone Subtitle** (`StandaloneSubtitle.jsx`) — Just subtitles, no clip generation. Three-phase flow: Phase 1 (transcribe + reframe), Phase 2 (style + animations + lyrics align), Phase 3 (burn).
 
 5. **Standalone Voice Dubbing** (`StandaloneDub.jsx`) — Just AI voice dub in 30+ languages, no clip generation. Optionally burns target-language subtitles after dubbing.
 
