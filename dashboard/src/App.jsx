@@ -10,6 +10,7 @@ import About from './components/About';
 import StandaloneDub from './components/StandaloneDub';
 import StandaloneSubtitle from './components/StandaloneSubtitle';
 import StandaloneAudioClean from './components/StandaloneAudioClean';
+import StandaloneYouTubeSEO from './components/StandaloneYouTubeSEO';
 import SmartClipper from './components/SmartClipper';
 import HorizontalToVertical from './components/HorizontalToVertical';
 import AIAvatar from './components/AIAvatar';
@@ -228,6 +229,7 @@ function App() {
     subtitle: 0,
     dub: 0,
     audioclean: 0,
+    youtubeseo: 0,
   });
   const goHomeOfTab = (id) => {
     setActiveTab(id);
@@ -752,6 +754,7 @@ function App() {
       { id: 'subtitle',  label: 'Auto Subtitle',        icon: Type,     accentText: 'text-orange-300',  accentBg: 'bg-orange-500/10' },
       { id: 'dub',       label: 'Voice Dubbing',        icon: Languages, accentText: 'text-emerald-300', accentBg: 'bg-emerald-500/10' },
       { id: 'audioclean',label: 'Audio Cleaning',       icon: Wand2,    accentText: 'text-sky-300',     accentBg: 'bg-sky-500/10' },
+      { id: 'youtubeseo',label: 'YouTube SEO',          icon: Youtube,  accentText: 'text-red-300',     accentBg: 'bg-red-500/10' },
       { id: 'avatar',    label: 'AI Avatar',            icon: UserCircle2, accentText: 'text-violet-300', accentBg: 'bg-violet-500/10', badge: 'Preview' },
     ];
     return (
@@ -1280,6 +1283,29 @@ function App() {
           {activeTab === 'audioclean' && (
             <StandaloneAudioClean homeBump={tabHomeBump.audioclean} />
           )}
+
+          {/* View: YouTube SEO (transcribe -> titles / description / tags / chapters) */}
+          {activeTab === 'youtubeseo' && (() => {
+            let provider = llmConfig?.provider || 'gemini';
+            let model = llmConfig?.model || 'gemini-2.5-flash';
+            let key = apiKey || '';
+            try {
+              const prefRaw = localStorage.getItem('os_llm_pref_last');
+              if (prefRaw) { const p = JSON.parse(prefRaw); if (p?.provider) provider = p.provider; if (p?.model) model = p.model; }
+              const keyRaw = localStorage.getItem(`os_llm_key_${provider}`);
+              if (keyRaw) {
+                const SALT = 'openshorts-llm-v1';
+                const decoded = atob(keyRaw); let out = '';
+                for (let i = 0; i < decoded.length; i++) out += String.fromCharCode(decoded.charCodeAt(i) ^ SALT.charCodeAt(i % SALT.length));
+                if (out) key = out;
+              }
+            } catch {}
+            const llmHeaders = {
+              'X-LLM-Provider': provider, 'X-LLM-Model': model, 'X-LLM-Key': key,
+              'X-Gemini-Key': provider === 'gemini' ? key : '',
+            };
+            return <StandaloneYouTubeSEO llmHeaders={llmHeaders} homeBump={tabHomeBump.youtubeseo} />;
+          })()}
 
           {/* View: Smart Clipper (multimodal viral-moment picker) */}
           {activeTab === 'smartclip' && (

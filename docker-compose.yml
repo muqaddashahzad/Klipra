@@ -208,3 +208,27 @@ services:
     restart: unless-stopped
     depends_on:
       - backend
+
+  # ---- Audio Cleaning engine (Clearcast) ----
+  # Studio-quality voice cleanup (de-noise / de-reverb / restore). Starts and
+  # restarts automatically with the rest of the Klipra stack. The dashboard
+  # reaches it at http://clearcast:8770 via the Vite proxy (/clearcast).
+  clearcast:
+    build: ./clearcast
+    container_name: klipra-clearcast
+    ports:
+      - "8770:8770"
+    volumes:
+      # live code + persistent model/checkpoint cache (gitignored on the host)
+      - ./clearcast:/app
+      # same local folders as the backend, so "Use file from disk" works
+      - ${HOME}/Desktop/Movies:/app/local_media:ro
+      - ${HOME}/Desktop:/app/local_desktop:ro
+      - ${HOME}/Downloads:/app/local_downloads:ro
+      - ${HOME}/Documents:/app/local_documents:ro
+      - ${HOME}/Movies:/app/local_movies:ro
+    environment:
+      XDG_CACHE_HOME: /app/.cache
+      TORCH_HOME: /app/.cache/torch
+      HF_HOME: /app/.cache/huggingface
+    restart: unless-stopped

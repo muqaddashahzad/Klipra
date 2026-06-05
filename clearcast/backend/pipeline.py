@@ -19,10 +19,13 @@ import importlib.util
 import json
 import shutil
 import subprocess
+import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
-VENV_PY = ROOT / ".venv" / "bin" / "python"
+# Run engine subprocesses with the SAME interpreter as the server — works both
+# in the Docker image (system python) and the host venv.
+VENV_PY = sys.executable
 DEEPFILTER_BIN = ROOT / "bin" / "deep-filter"
 ENGINES_DIR = Path(__file__).resolve().parent / "engines"
 DEEPFILTER_PY = ENGINES_DIR / "run_deepfilter.py"

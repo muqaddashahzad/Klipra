@@ -8,17 +8,21 @@ This file is the **entry point** for any AI agent (Claude Code, Cursor, etc.) wo
 
 The codebase was forked from the open-source `openshorts` project, but has diverged substantially. Treat the README.md and any "OpenShorts" references as legacy — the product is Klipra.
 
-### Three user-facing products
+### Six user-facing products
 
 1. **Generate Viral Clips** (full pipeline) — Drop a YouTube URL or video file; Klipra transcribes, picks the best 4–8 viral moments, cuts them, reframes 16:9 → 9:16 with face tracking, burns subtitles, adds viral hook overlays, and optionally posts to TikTok/Instagram/YouTube. Code lives in `main.py` + `app.py`.
 
-2. **Smart Clipper** (`SmartClipper.jsx`, `multimodal_picker.py`, `smart_clipper_pro.py`) — A multimodal-VLM-driven picker that watches the video frame-by-frame in addition to reading the transcript. Has two modes:
+2. **AI Audio Cleaning** (`StandaloneAudioClean.jsx`, `clearcast/`) — Adobe Podcast Enhance, self-hosted and open-source. Upload audio or video; the engine auto-diagnoses every problem (noise, reverb, hum, clipping, sibilance) and applies targeted fixes step by step: WPE de-reverb → MossFormer2 voice restoration (ClearVoice) → DeepFilterNet polish → professional mastering to −16 LUFS. Outputs 24-bit/48 kHz WAV or MP3; video files get the clean audio re-muxed back in. Runs as its own Docker service (`clearcast/`, port 8770) so it never interferes with the main backend. Measured noise floor: −81 dB (vs Adobe's −58 dB). Code: `clearcast/backend/pipeline.py`, `clearcast/backend/analyze.py`, `clearcast/backend/engines/`.
+
+3. **Smart Clipper** (`SmartClipper.jsx`, `multimodal_picker.py`, `smart_clipper_pro.py`) — A multimodal-VLM-driven picker that watches the video frame-by-frame in addition to reading the transcript. Has two modes:
    - **Fast** — Single-pass picker with a per-signal scoring rubric (punchline, reversal, awkward_pause, one_liner, audio_peak, visual_energy).
    - **Pro** — 5-stage pipeline (transcribe → translate → per-frame visual analysis → window scoring → greedy selection) with sentence-boundary snapping and multi-size candidate windows.
 
-3. **Standalone Subtitle** (`StandaloneSubtitle.jsx`) — Just subtitles, no clip generation. Three-phase flow: Phase 1 (transcribe + reframe), Phase 2 (style + animations + lyrics align), Phase 3 (burn).
+4. **Standalone Subtitle** (`StandaloneSubtitle.jsx`) — Just subtitles, no clip generation. Three-phase flow: Phase 1 (transcribe + reframe), Phase 2 (style + animations + lyrics align), Phase 3 (burn).
 
-4. **Standalone Voice Dubbing** (`StandaloneDub.jsx`) — Just AI voice dub in 30+ languages, no clip generation. Optionally burns target-language subtitles after dubbing.
+5. **Standalone Voice Dubbing** (`StandaloneDub.jsx`) — Just AI voice dub in 30+ languages, no clip generation. Optionally burns target-language subtitles after dubbing.
+
+6. **YouTube SEO** (`StandaloneYouTubeSEO.jsx`, `seo.py`) — Upload a video (or pick from disk / paste a URL); Klipra transcribes with Whisper then sends the transcript to the user's chosen LLM (Gemini/Ollama/OpenAI/etc.) for 5 high-CTR YouTube title ideas, an optimised description with timestamped chapters already included, and search tags. Output language is selectable (English default, Roman Urdu, or any language). Backend: `POST /api/standalone/seo` in `app.py`, logic in `seo.py`.
 
 (Smart Clipper outputs flow into the same per-clip ResultCard as Generate Viral Clips, so all post-processing — subtitle, dub, edit, reframe, motion graphics, post-to-social — works on Smart Clipper picks too.)
 
@@ -29,8 +33,9 @@ Three Docker services defined in `docker-compose.yml`:
 | Service | Container name | Image | Port | What it does |
 |---|---|---|---|---|
 | `backend` | `klipra-backend` | built from `./Dockerfile` | 8000 | FastAPI + Uvicorn. The main API server (`app.py`) plus all video processing (`main.py`, `motion_graphics.py`, etc.). Has ffmpeg, Whisper, mediapipe, yt-dlp inside. |
-| `frontend` | `klipra-frontend` | node:20 | 5175 → 5173 | React + Vite dashboard. Hot-reloads on edit. Proxies `/api/*` calls to backend. |
+| `frontend` | `klipra-frontend` | node:20 | 5175 → 5173 | React + Vite dashboard. Hot-reloads on edit. Proxies `/api/*` calls to backend and `/clearcast/*` to the clearcast service. |
 | `renderer` | `klipra-renderer` | built from `render-service/` | 4000 | Optional Remotion-based renderer for advanced compositions. Not always used. |
+| `clearcast` | `klipra-clearcast` | built from `./clearcast/` | 8770 | AI Audio Cleaning engine. WPE de-reverb + MossFormer2 + DeepFilterNet + ffmpeg mastering. Separate image so ML deps (torch, clearvoice, nara_wpe) never bloat the main backend. Models cache in `clearcast/.cache` + `clearcast/checkpoints` and survive restarts. |
 
 Optional **sidecar** (NOT in docker-compose): `whisper_sidecar/` is a native macOS service that runs Whisper on the M-series Metal GPU. Backend tries it first via `KLIPRA_WHISPER_SIDECAR_URL` and falls back to in-container CPU Whisper. Start it manually with `./whisper_sidecar/start.sh` if you want 10–15× faster transcription.
 
@@ -163,6 +168,8 @@ If the frontend shows a stale build after edits, hard-refresh with **Cmd+Shift+R
 - `/api/multimodal-clip/cut` — Smart Clipper cut picked clips
 - `/api/standalone/subtitle/*` — Standalone subtitle endpoints
 - `/api/standalone/dub/*` — Standalone dub endpoints
+- `/api/standalone/seo` — YouTube SEO: transcribe video → LLM generates titles, description (with chapters), tags (`seo.py`)
+- `/clearcast/api/*` — Audio Cleaning engine (proxied by Vite to `clearcast:8770`). Key routes: `POST /enhance` (upload), `POST /enhance_local` (disk path), `GET /status/{jid}`, `GET /media/{jid}/{which}`, `GET /download/{jid}[/video]`
 - `/api/clip/{job_id}/{clip_idx}/*` — Per-clip actions (subtitle, dub, edit, retrim, motion-graphics, etc.)
 - `/api/retry/{job_id}` — Resume a failed/interrupted job (reconstructs cmd if needed)
 - `/api/local/find` — Resolve a host file path → container path (for LOCAL_MODE)

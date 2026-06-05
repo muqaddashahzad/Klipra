@@ -51,6 +51,14 @@ ALLOWED_SUFFIXES = {
 # /app/local_movies/x.mp4). We run on the HOST, so map those prefixes back to
 # the real host folders, and only allow files under this allowlist.
 _HOME = os.path.expanduser("~")
+# Klipra's "Use file from disk" returns an in-CONTAINER path like
+# /app/local_movies/x.mp4. When we run as a Docker service we mount the SAME
+# folders at the SAME paths, so the path is valid as-is. When we run as a host
+# sidecar, map the /app/local_* prefixes back to the real host folders.
+_CONTAINER_ROOTS = [
+    "/app/local_media", "/app/local_desktop", "/app/local_downloads",
+    "/app/local_documents", "/app/local_movies", "/app/uploads", "/app/host_uploads",
+]
 _CONTAINER_TO_HOST = {
     "/app/local_media": f"{_HOME}/Desktop/Movies",
     "/app/local_desktop": f"{_HOME}/Desktop",
@@ -59,30 +67,34 @@ _CONTAINER_TO_HOST = {
     "/app/local_movies": f"{_HOME}/Movies",
     "/app/uploads": "/Volumes/Data/AntiGravity/Klipra/uploads",
 }
-_ALLOWED_HOST_ROOTS = [
+_ALLOWED_ROOTS = _CONTAINER_ROOTS + [
     f"{_HOME}/Desktop", f"{_HOME}/Downloads", f"{_HOME}/Documents",
     f"{_HOME}/Movies", f"{_HOME}/Music", "/Volumes/Data/AntiGravity/Klipra/uploads",
 ]
 
 
 def _resolve_local_path(raw: str) -> Path:
-    """Map a Klipra container path (or accept a host path) to a real, allowed host file."""
+    """Resolve a Klipra disk path to a real, allowed file — works whether we run
+    inside Docker (path valid as-is) or as a host sidecar (needs prefix mapping)."""
     raw = (raw or "").strip()
     if not raw:
         raise HTTPException(400, "No path provided")
-    mapped = raw
+    candidates = [raw]
     for cprefix, hprefix in _CONTAINER_TO_HOST.items():
         if raw == cprefix or raw.startswith(cprefix + "/"):
-            mapped = hprefix + raw[len(cprefix):]
+            candidates.append(hprefix + raw[len(cprefix):])
             break
-    p = Path(mapped).expanduser().resolve()
-    if not p.exists() or not p.is_file():
-        raise HTTPException(404, f"File not found: {raw}")
-    if not any(str(p).startswith(str(Path(r).resolve()) + os.sep) for r in _ALLOWED_HOST_ROOTS):
-        raise HTTPException(403, "Path is outside the allowed folders")
-    if p.suffix.lower() not in ALLOWED_SUFFIXES:
-        raise HTTPException(400, f"Unsupported file type: {p.suffix}")
-    return p
+    allowed = [str(Path(r).resolve()) for r in _ALLOWED_ROOTS]
+    for cand in candidates:
+        p = Path(cand).expanduser().resolve()
+        if not p.exists() or not p.is_file():
+            continue
+        if not any(str(p) == r or str(p).startswith(r + os.sep) for r in allowed):
+            raise HTTPException(403, "Path is outside the allowed folders")
+        if p.suffix.lower() not in ALLOWED_SUFFIXES:
+            raise HTTPException(400, f"Unsupported file type: {p.suffix}")
+        return p
+    raise HTTPException(404, f"File not found: {raw}")
 
 
 def _set(jid: str, **kw) -> None:

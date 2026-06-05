@@ -226,7 +226,7 @@ export default function StandaloneAudioClean({ homeBump = 0 }) {
         {engineOffline && (
           <div className="mb-4 p-3 rounded-xl bg-amber-500/10 border border-amber-500/20 text-xs text-amber-200 flex gap-2">
             <AlertCircle size={15} className="shrink-0 mt-0.5" />
-            <span>The audio-cleaning engine isn’t running. Double-click <b>Start-Audio-Cleaning.command</b> in the Klipra folder, then retry.</span>
+            <span>The audio-cleaning engine is starting up (it loads AI models on first run). Make sure Docker is running, give it a moment, then retry.</span>
           </div>
         )}
 

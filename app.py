@@ -7781,6 +7781,96 @@ async def standalone_subtitle_undo_sync(req: StandaloneUndoSyncRequest):
 
 # ---------- Standalone Dub ----------
 
+@app.post("/api/standalone/seo")
+async def standalone_seo(
+    request: Request,
+    file: Optional[UploadFile] = File(None),
+    url: Optional[str] = Form(None),
+    local_path: Optional[str] = Form(None),
+    output_language: Optional[str] = Form("English"),
+):
+    """YouTube SEO tool. Transcribes the video with Whisper, then asks the user's
+    chosen LLM for 5 high-CTR title ideas, an optimized description, tags, and
+    timestamped chapters (snapped to real transcript boundaries)."""
+    if not file and not (url and url.strip()) and not (local_path and local_path.strip()):
+        raise HTTPException(400, "Provide a video file, pick one from disk, or paste a URL.")
+    x_llm_provider = request.headers.get("X-LLM-Provider") or "gemini"
+    x_llm_model = request.headers.get("X-LLM-Model") or "gemini-2.5-flash"
+    x_llm_key = request.headers.get("X-LLM-Key") or ""
+    x_llm_base_url = request.headers.get("X-LLM-Base-URL") or None
+
+    job_id = str(uuid.uuid4())
+    job_dir = os.path.join(OUTPUT_DIR, f"standalone_{job_id}")
+    os.makedirs(job_dir, exist_ok=True)
+    if file:
+        title_source = file.filename or "Untitled"
+    elif local_path:
+        title_source = os.path.basename(local_path.strip())
+    else:
+        title_source = (url or "URL").strip()[:120]
+    standalone_jobs[job_id] = {
+        "status": "queued", "kind": "seo", "logs": ["Job queued."],
+        "output_dir": job_dir, "result": None, "created_at": time.time(),
+        "title": f"SEO · {title_source}",
+    }
+    try:
+        if file:
+            input_path = _standalone_save_upload(file, job_id)
+        elif local_path:
+            input_path = _resolve_local_media_path(local_path.strip())
+        else:
+            from main import download_url_video
+            os.makedirs(UPLOAD_DIR, exist_ok=True)
+            input_path, fetched_title = await asyncio.get_event_loop().run_in_executor(
+                None, lambda: download_url_video(url.strip(), UPLOAD_DIR))
+            if fetched_title:
+                standalone_jobs[job_id]["title"] = f"SEO · {fetched_title}"
+    except HTTPException:
+        standalone_jobs.pop(job_id, None)
+        raise
+    except Exception as e:
+        standalone_jobs.pop(job_id, None)
+        raise HTTPException(400, f"Could not read the video: {e}")
+    _standalone_persist(job_id)
+
+    async def run():
+        try:
+            _standalone_status(job_id, "transcribing", "Transcribing the video with Whisper…")
+            from main import transcribe_video
+            loop = asyncio.get_event_loop()
+            transcript = await loop.run_in_executor(None, transcribe_video, input_path)
+            if not transcript or not transcript.get("segments"):
+                raise RuntimeError("Couldn't find any speech to transcribe in this video.")
+            _standalone_save_blob(job_id, "whisper_original", transcript)
+
+            _standalone_status(job_id, "analyzing", "Understanding the video & writing SEO…")
+            import seo as seo_mod
+            from llm import build_provider
+            from smart_clipper_pro import _complete_json_with_retry
+            segs = transcript.get("segments") or []
+            duration = float(segs[-1].get("end", 0.0)) if segs else 0.0
+            system, user = seo_mod.build_prompt(transcript, duration, output_language=output_language)
+            provider = build_provider(x_llm_provider, x_llm_model,
+                                      api_key=x_llm_key, base_url=x_llm_base_url)
+            raw = await loop.run_in_executor(
+                None,
+                lambda: _complete_json_with_retry(
+                    provider, system=system, user=user, max_tokens=3000),
+            )
+            result = seo_mod.postprocess(raw, transcript, duration)
+            result["language"] = transcript.get("language")
+            result["duration"] = int(duration)
+            _standalone_save_blob(job_id, "seo_result", result)
+            _standalone_status(job_id, "completed", "Done!", result=result)
+        except Exception as e:
+            import traceback
+            traceback.print_exc()
+            _standalone_status(job_id, "failed", f"Error: {e}")
+
+    asyncio.create_task(run())
+    return {"job_id": job_id, "status": "queued"}
+
+
 @app.post("/api/standalone/dub")
 async def standalone_dub(
     request: Request,

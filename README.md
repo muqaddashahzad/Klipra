@@ -19,6 +19,8 @@ The single biggest change: **Klipra runs on free local AI by default**. The orig
 
 Other things Klipra adds on top of OpenShorts:
 
+- **AI Audio Cleaning** *(Adobe Podcast Enhance, self-hosted)* — removes noise, room echo/reverb, hum, and clipping from any audio or video. Auto-diagnoses each problem, fixes them in order, explains what it did. Cleaner results than Adobe (−81 dB noise floor). Outputs 24-bit WAV or MP3; re-muxes clean audio back into videos.
+- **YouTube SEO** — transcribes your video, then generates 5 high-CTR title ideas, an optimised description with timestamped chapters built in, and search tags. English output by default (or Roman Urdu, or any language).
 - **Smart Clipper (Fast + Pro)** — a multimodal-VLM picker that *watches* the video, not just reads the transcript. Pro mode is a 5-stage pipeline with sentence-boundary snapping and multi-size candidates.
 - **Standalone Subtitle** — three-phase flow (transcribe → style → burn) that works on any video without the full clip pipeline.
 - **Standalone Voice Dubbing** — 30+ languages via ElevenLabs, with optional target-language subtitle burn after dubbing.
@@ -77,14 +79,21 @@ Bind mounts (data survives `docker compose down`):
 
 ---
 
-## The four products
+## The six products
 
 1. **Generate Viral Clips** *(full pipeline)* — drop a YouTube URL or video file; Klipra transcribes, picks 4–8 viral moments, cuts them, reframes 16:9 → 9:16 with face tracking, burns subtitles, adds a viral hook, and optionally posts to TikTok / Instagram / YouTube. `main.py` + `app.py`.
-2. **Smart Clipper** — multimodal VLM picker. **Fast** mode = single-pass with a per-signal scoring rubric (punchline, reversal, awkward_pause, one_liner, audio_peak, visual_energy). **Pro** mode = 5-stage pipeline. `multimodal_picker.py` + `smart_clipper_pro.py`.
-3. **Standalone Subtitle** — three-phase flow, no clip generation, works on any video. `subtitles.py`.
-4. **Standalone Voice Dubbing** — 30+ languages, optional target-language subtitle burn. `translate.py`.
 
-All four products feed into the same per-clip ResultCard, so subtitle / dub / edit / reframe / motion-graphics / post-to-social work on every output regardless of which product produced it.
+2. **AI Audio Cleaning** *(Adobe Podcast Enhance — self-hosted)* — upload any audio or video file; Klipra auto-diagnoses every problem it finds (background noise, room echo/reverb, electrical hum, clipping, sibilance) and removes them step by step using WPE de-reverb → MossFormer2 voice restoration → DeepFilterNet polish → professional mastering. Outputs 24-bit/48 kHz WAV or MP3. For video files, the cleaned audio is re-muxed back into the original video. Results are cleaner than Adobe Podcast Enhance (−81 dB noise floor vs Adobe's −58 dB). Runs as a dedicated Docker service (`clearcast/`). `clearcast/backend/pipeline.py` + `clearcast/backend/analyze.py`.
+
+3. **Smart Clipper** — multimodal VLM picker. **Fast** mode = single-pass with a per-signal scoring rubric (punchline, reversal, awkward_pause, one_liner, audio_peak, visual_energy). **Pro** mode = 5-stage pipeline. `multimodal_picker.py` + `smart_clipper_pro.py`.
+
+4. **Standalone Subtitle** — three-phase flow, no clip generation, works on any video. `subtitles.py`.
+
+5. **Standalone Voice Dubbing** — 30+ languages, optional target-language subtitle burn. `translate.py`.
+
+6. **YouTube SEO** — upload a video (or pick from disk / paste a URL); Klipra transcribes it with Whisper then asks your chosen AI provider for 5 high-CTR title ideas, an optimised description with timestamped chapters built in, and search tags. Output language is selectable (English default, Roman Urdu, or any language). `seo.py` + `/api/standalone/seo`.
+
+Products 1, 3, 4 and 5 feed into the same per-clip ResultCard, so subtitle / dub / edit / reframe / motion-graphics / post-to-social work on every output regardless of which product produced it.
 
 ---
 

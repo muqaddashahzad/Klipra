@@ -1,0 +1,9 @@
+.venv
+checkpoints
+jobs
+bin
+.cache
+__pycache__
+*.pyc
+setup_heavy.log
+.git
