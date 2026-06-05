@@ -8,7 +8,7 @@ This file is the **entry point** for any AI agent (Claude Code, Cursor, etc.) wo
 
 The codebase was forked from the open-source `openshorts` project, but has diverged substantially. Treat the README.md and any "OpenShorts" references as legacy — the product is Klipra.
 
-### Six user-facing products
+### Five user-facing products
 
 1. **Generate Viral Clips** (full pipeline) — Drop a YouTube URL or video file; Klipra transcribes, picks the best 4–8 viral moments, cuts them, reframes 16:9 → 9:16 with face tracking, burns subtitles, adds viral hook overlays, and optionally posts to TikTok/Instagram/YouTube. Code lives in `main.py` + `app.py`.
 
@@ -21,8 +21,6 @@ The codebase was forked from the open-source `openshorts` project, but has diver
 4. **Standalone Subtitle** (`StandaloneSubtitle.jsx`) — Just subtitles, no clip generation. Three-phase flow: Phase 1 (transcribe + reframe), Phase 2 (style + animations + lyrics align), Phase 3 (burn).
 
 5. **Standalone Voice Dubbing** (`StandaloneDub.jsx`) — Just AI voice dub in 30+ languages, no clip generation. Optionally burns target-language subtitles after dubbing.
-
-6. **YouTube SEO** (`StandaloneYouTubeSEO.jsx`, `seo.py`) — Upload a video (or pick from disk / paste a URL); Klipra transcribes with Whisper then sends the transcript to the user's chosen LLM (Gemini/Ollama/OpenAI/etc.) for 5 high-CTR YouTube title ideas, an optimised description with timestamped chapters already included, and search tags. Output language is selectable (English default, Roman Urdu, or any language). Backend: `POST /api/standalone/seo` in `app.py`, logic in `seo.py`.
 
 (Smart Clipper outputs flow into the same per-clip ResultCard as Generate Viral Clips, so all post-processing — subtitle, dub, edit, reframe, motion graphics, post-to-social — works on Smart Clipper picks too.)
 
@@ -168,7 +166,6 @@ If the frontend shows a stale build after edits, hard-refresh with **Cmd+Shift+R
 - `/api/multimodal-clip/cut` — Smart Clipper cut picked clips
 - `/api/standalone/subtitle/*` — Standalone subtitle endpoints
 - `/api/standalone/dub/*` — Standalone dub endpoints
-- `/api/standalone/seo` — YouTube SEO: transcribe video → LLM generates titles, description (with chapters), tags (`seo.py`)
 - `/clearcast/api/*` — Audio Cleaning engine (proxied by Vite to `clearcast:8770`). Key routes: `POST /enhance` (upload), `POST /enhance_local` (disk path), `GET /status/{jid}`, `GET /media/{jid}/{which}`, `GET /download/{jid}[/video]`
 - `/api/clip/{job_id}/{clip_idx}/*` — Per-clip actions (subtitle, dub, edit, retrim, motion-graphics, etc.)
 - `/api/retry/{job_id}` — Resume a failed/interrupted job (reconstructs cmd if needed)
