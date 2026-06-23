@@ -1,8 +1,9 @@
 import React, { useState, useEffect } from 'react';
-import { Upload, FileVideo, Sparkles, Youtube, Instagram, Share2, LogOut, ChevronDown, Check, Activity, LayoutDashboard, Settings, PlusCircle, History, Menu, X, Terminal, Shield, LayoutGrid, Image, Globe, RotateCcw, Calendar, Trash2, Tag, Info, Type, Languages, Brain, Film, UserCircle2, Wand2 } from 'lucide-react';
+import { Upload, FileVideo, Sparkles, Youtube, Instagram, Share2, LogOut, ChevronDown, Check, Activity, LayoutDashboard, Settings, PlusCircle, History, Menu, X, Terminal, Shield, LayoutGrid, Image, Globe, RotateCcw, Calendar, Trash2, Tag, Info, Type, Languages, Brain, Film, UserCircle2, Wand2, Mic } from 'lucide-react';
 import KeyInput from './components/KeyInput';
 import ProviderPicker from './components/ProviderPicker';
 import MediaInput from './components/MediaInput';
+import TranscriptReviewPanel from './components/TranscriptReviewPanel';
 import ResultCard from './components/ResultCard';
 import PastProjects from './components/PastProjects';
 import Pricing from './components/Pricing';
@@ -145,7 +146,14 @@ const SESSION_MAX_AGE = 3600000; // 1 hour (matches server job retention)
 // Mock polling function
 const pollJob = async (jobId) => {
   const res = await fetch(getApiUrl(`/api/status/${jobId}`));
-  if (!res.ok) throw new Error('Status check failed');
+  if (!res.ok) {
+    // Carry the HTTP status so the poller can tell "job is gone" (404 —
+    // the backend keeps jobs in memory, so a restart wipes them) apart
+    // from a transient network blip it should ride out.
+    const err = new Error('Status check failed');
+    err.httpStatus = res.status;
+    throw err;
+  }
   return res.json();
 };
 
@@ -154,8 +162,8 @@ function App() {
   // ergonomically maps to `llmConfig.api_key` so the dozens of existing
   // usages don't need rewiring.
   const [llmConfig, setLlmConfig] = useState({
-    provider: 'gemini',
-    model: 'gemini-2.5-flash',
+    provider: 'gemini-subscription',
+    model: 'gemini-3-flash-plus',
     api_key: localStorage.getItem('gemini_key') || '',
   });
   // Backwards-compatible alias used everywhere else in this component.
@@ -193,8 +201,10 @@ function App() {
   const [userProfiles, setUserProfiles] = useState([]); // List of {username, connected: []}
   const [showKeyModal, setShowKeyModal] = useState(false);
   const [jobId, setJobId] = useState(null);
-  const [status, setStatus] = useState('idle'); // idle, processing, complete, error
+  const [status, setStatus] = useState('idle'); // idle, processing, awaiting_cleanup, complete, error
   const [results, setResults] = useState(null);
+  // Raw transcript captured when a job pauses for manual cleanup (HITL).
+  const [rawTranscript, setRawTranscript] = useState(null);
   const [logs, setLogs] = useState([]);
   const [logsVisible, setLogsVisible] = useState(true);
   const [processingMedia, setProcessingMedia] = useState(null);
@@ -530,17 +540,65 @@ function App() {
             const errorMsg = data.error || (data.logs && data.logs.length > 0 ? data.logs[data.logs.length - 1] : "Process failed");
             setLogs(prev => [...prev, "Error: " + errorMsg]);
             clearInterval(interval);
+          } else if (data.status === 'awaiting_cleanup') {
+            // Human-in-the-loop pause: transcription done, stop polling and
+            // load the raw transcript for the review/cleanup panel.
+            if (data.logs) setLogs(data.logs);
+            clearInterval(interval);
+            try {
+              const r = await fetch(getApiUrl(`/api/job/${jobId}/transcript`));
+              if (r.ok) setRawTranscript(await r.json());
+            } catch (_) { /* panel will show a retry */ }
+            setStatus('awaiting_cleanup');
           } else {
             // Update logs if available
             if (data.logs) setLogs(data.logs);
           }
         } catch (e) {
+          if (e.httpStatus === 404) {
+            // The job no longer exists server-side (jobs live in memory,
+            // so a backend restart wipes them). Without this branch the
+            // poller retried a dead job id every 2s forever and the UI
+            // stayed frozen on the processing spinner with no way out.
+            clearInterval(interval);
+            try { localStorage.removeItem(SESSION_KEY); } catch { /* ignore */ }
+            setStatus('error');
+            setLogs(prev => [...prev,
+              "Error: This job no longer exists on the server — the backend was restarted while it was running. Click New to start over."]);
+            return;
+          }
           console.error("Polling error", e);
         }
       }, 2000);
     }
     return () => clearInterval(interval);
   }, [status, jobId]);
+
+  // Fetch the paused transcript whenever we're in awaiting_cleanup without it.
+  // The polling effect above only runs for processing/completed, so a session
+  // RESTORED directly into awaiting_cleanup (e.g. after a page reload) would
+  // otherwise render the review panel forever stuck on "Loading transcript…"
+  // because nothing ever fetched it. If the job is gone server-side (404 —
+  // backend restarted), surface a clear recovery message instead of spinning.
+  useEffect(() => {
+    if (status !== 'awaiting_cleanup' || !jobId || rawTranscript) return;
+    let alive = true;
+    (async () => {
+      try {
+        const r = await fetch(getApiUrl(`/api/job/${jobId}/transcript`));
+        if (!alive) return;
+        if (r.ok) {
+          setRawTranscript(await r.json());
+        } else if (r.status === 404) {
+          try { localStorage.removeItem(SESSION_KEY); } catch { /* ignore */ }
+          setStatus('error');
+          setLogs(prev => [...prev,
+            "Error: This paused job no longer exists on the server (the backend was restarted). Click New to start a fresh job."]);
+        }
+      } catch (_) { /* transient — effect re-runs if deps change, or user can reload */ }
+    })();
+    return () => { alive = false; };
+  }, [status, jobId, rawTranscript]);
 
 
   const fetchUserProfiles = async () => {
@@ -572,7 +630,7 @@ function App() {
     // Required" modal. The old code only looked at `apiKey` (the Gemini
     // key slot) and showed the modal for any empty key — including the
     // perfectly-valid "Ollama, no key needed" case.
-    let _gateProvider = 'gemini';
+    let _gateProvider = 'gemini-subscription';
     let _gateKey = apiKey || '';
     try {
       const prefRaw = localStorage.getItem('os_llm_pref_last');
@@ -592,9 +650,11 @@ function App() {
         if (out) _gateKey = out;
       }
     } catch (_) { /* localStorage may be unavailable in some browsers */ }
-    // Ollama (local) needs no key — let it through. Every other provider
-    // still requires a key before we even start uploading.
-    if (_gateProvider !== 'ollama' && !_gateKey) {
+    // Keyless providers — let them through without an API key:
+    //   ollama              → local, no key by design
+    //   gemini-subscription → uses gemini.google.com cookies, no key
+    const KEYLESS_PROVIDERS = ['ollama', 'gemini-subscription'];
+    if (!KEYLESS_PROVIDERS.includes(_gateProvider) && !_gateKey) {
       setShowKeyModal(true);
       return;
     }
@@ -612,8 +672,8 @@ function App() {
       // setLlmConfig path (state) can lag by one render. Reading from
       // localStorage eliminates that whole class of "GEMINI was sent
       // even though I picked MiniMax" bugs.
-      let liveProvider = llmConfig.provider || 'gemini';
-      let liveModel = llmConfig.model || 'gemini-2.5-flash';
+      let liveProvider = llmConfig.provider || 'gemini-subscription';
+      let liveModel = llmConfig.model || 'gemini-3-flash-plus';
       let liveKey = apiKey || '';
       try {
         const prefRaw = localStorage.getItem('os_llm_pref_last');
@@ -656,6 +716,8 @@ function App() {
         // pass language hint + script-script preference.
         'X-Transcript-Lang': String(opts.transcriptLang || ''),
         'X-Transcript-Script': String(opts.transcriptScript || 'auto'),
+        // Human-in-the-loop: pause after transcription for manual cleanup.
+        'X-Pause-After-Transcript': opts.pauseForCleanup ? '1' : '0',
         // Stage-1 engine choice. Header value 'whisper' or 'elevenlabs'.
         'X-Transcribe-Provider': String(opts.transcribeProvider || 'whisper'),
         // Forward the ElevenLabs key so backend can use it for Scribe
@@ -756,6 +818,7 @@ function App() {
       { id: 'audioclean',label: 'Audio Cleaning',       icon: Wand2,    accentText: 'text-sky-300',     accentBg: 'bg-sky-500/10' },
       { id: 'youtubeseo',label: 'YouTube SEO',          icon: Youtube,  accentText: 'text-red-300',     accentBg: 'bg-red-500/10' },
       { id: 'avatar',    label: 'AI Avatar',            icon: UserCircle2, accentText: 'text-violet-300', accentBg: 'bg-violet-500/10', badge: 'Preview' },
+      { id: 'podcast',   label: 'Podcast Studio',       icon: Mic,         accentText: 'text-pink-300',   accentBg: 'bg-pink-500/10' },
     ];
     return (
     <header className="h-14 sm:h-16 border-b border-border bg-surface/80 backdrop-blur-md flex items-center justify-between px-3 sm:px-5 shrink-0 z-20 relative">
@@ -970,7 +1033,7 @@ function App() {
         </div>
       )}
 
-      <main className="flex-1 flex flex-col h-full overflow-hidden relative">
+      <main className="flex-1 flex flex-col overflow-hidden relative">
         {/* Background Gradients */}
         <div className="absolute inset-0 overflow-hidden -z-10 pointer-events-none">
           <div className="absolute -top-[10%] -right-[10%] w-[60%] h-[50%] bg-primary/5 rounded-full blur-[120px]" />
@@ -1235,8 +1298,8 @@ function App() {
           {activeTab === 'subtitle' && (() => {
             // Build LLM headers fresh from localStorage so the page
             // always has the latest provider config.
-            let provider = llmConfig?.provider || 'gemini';
-            let model = llmConfig?.model || 'gemini-2.5-flash';
+            let provider = llmConfig?.provider || 'gemini-subscription';
+            let model = llmConfig?.model || 'gemini-3-flash-plus';
             let key = apiKey || '';
             try {
               const prefRaw = localStorage.getItem('os_llm_pref_last');
@@ -1258,8 +1321,8 @@ function App() {
 
           {/* View: Standalone Dub (whole-video translation + voice) */}
           {activeTab === 'dub' && (() => {
-            let provider = llmConfig?.provider || 'gemini';
-            let model = llmConfig?.model || 'gemini-2.5-flash';
+            let provider = llmConfig?.provider || 'gemini-subscription';
+            let model = llmConfig?.model || 'gemini-3-flash-plus';
             let key = apiKey || '';
             try {
               const prefRaw = localStorage.getItem('os_llm_pref_last');
@@ -1286,8 +1349,8 @@ function App() {
 
           {/* View: YouTube SEO (transcribe -> titles / description / tags / chapters) */}
           {activeTab === 'youtubeseo' && (() => {
-            let provider = llmConfig?.provider || 'gemini';
-            let model = llmConfig?.model || 'gemini-2.5-flash';
+            let provider = llmConfig?.provider || 'gemini-subscription';
+            let model = llmConfig?.model || 'gemini-3-flash-plus';
             let key = apiKey || '';
             try {
               const prefRaw = localStorage.getItem('os_llm_pref_last');
@@ -1345,6 +1408,18 @@ function App() {
             />
           )}
 
+          {/* View: Podcast Studio (klipra-podcast) */}
+          {activeTab === 'podcast' && (
+            <div className="w-full h-full flex flex-col bg-[#0a0e17] overflow-hidden">
+              <iframe
+                src={`${window.location.protocol}//${window.location.hostname}:3000`}
+                title="Klipra Podcast Studio"
+                className="w-full flex-1 border-0"
+                allow="camera; microphone; display-capture; fullscreen; autoplay; clipboard-write; clipboard-read"
+              />
+            </div>
+          )}
+
           {/* View: Gallery */}
           {/* {activeTab === 'gallery' && (
             <Gallery />
@@ -1372,7 +1447,7 @@ function App() {
                     </p>
                   </div>
 
-                  <MediaInput onProcess={handleProcess} isProcessing={status === 'processing'} />
+                  <MediaInput onProcess={handleProcess} isProcessing={status === 'processing'} provider={llmConfig?.provider} />
 
                   {/* Interactive AI picker. Click → switch provider /
                       model / paste key right here without going to
@@ -1439,7 +1514,7 @@ function App() {
           )}
 
           {/* View: Processing / Results (Split View) */}
-          {activeTab === 'dashboard' && (status === 'processing' || status === 'complete' || status === 'error') && (
+          {activeTab === 'dashboard' && (status === 'processing' || status === 'awaiting_cleanup' || status === 'complete' || status === 'error') && (
             <div className="h-full flex flex-col md:flex-row animate-[fadeIn_0.3s_ease-out]">
 
               {/* Left Panel: Preview & Status */}
@@ -1572,6 +1647,13 @@ function App() {
                         <div className="w-12 h-12 rounded-full border-2 border-zinc-800 border-t-primary animate-spin" />
                         <p className="text-sm">Waiting for clips...</p>
                       </div>
+                    ) : status === 'awaiting_cleanup' ? (
+                      <TranscriptReviewPanel
+                        jobId={jobId}
+                        transcript={rawTranscript}
+                        onLog={(line) => setLogs(prev => [...prev, line])}
+                        onProceed={() => { setRawTranscript(null); setStatus('processing'); }}
+                      />
                     ) : status === 'error' ? (
                       <ResumePanel
                         jobId={jobId}
@@ -1736,12 +1818,12 @@ function ActiveProviderBadge() {
       try {
         const raw = localStorage.getItem('os_llm_pref_last');
         const pref = raw ? JSON.parse(raw) : {};
-        const p = pref?.provider || 'gemini';
-        const m = pref?.model || 'gemini-2.5-flash';
+        const p = pref?.provider || 'gemini-subscription';
+        const m = pref?.model || 'gemini-3-flash-plus';
         const k = localStorage.getItem(`os_llm_key_${p}`);
         setInfo({ provider: p, model: m, hasKey: !!k });
       } catch {
-        setInfo({ provider: 'gemini', model: 'gemini-2.5-flash', hasKey: false });
+        setInfo({ provider: 'gemini-subscription', model: 'gemini-3-flash-plus', hasKey: false });
       }
     };
     tick();
@@ -1749,7 +1831,7 @@ function ActiveProviderBadge() {
     return () => clearInterval(id);
   }, []);
 
-  const ok = info.hasKey || info.provider === 'ollama';
+  const ok = info.hasKey || info.provider === 'ollama' || info.provider === 'gemini-subscription';
   return (
     <div className={
       'mt-3 mx-auto inline-flex items-center gap-2 px-3 py-1.5 rounded-full text-[11px] font-mono ' +

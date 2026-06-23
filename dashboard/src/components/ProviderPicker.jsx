@@ -1,4 +1,5 @@
 import React, { useEffect, useRef, useState } from 'react';
+import { createPortal } from 'react-dom';
 import { ChevronDown, Eye, EyeOff, Check, Sparkles, ExternalLink, Info, DollarSign, Star, RefreshCw, AlertTriangle } from 'lucide-react';
 import { getApiUrl } from '../config.js';
 
@@ -32,6 +33,12 @@ const COST_GUIDE = {
         quality: 5,
         badge: 'Best hooks',
         note: 'Claude Sonnet 4.6 writes the most compelling clip titles + descriptions. Slightly pricier than Gemini.',
+    },
+    'gemini-subscription': {
+        perVideo: 0.00,
+        quality: 5,
+        badge: 'No quota (subscription)',
+        note: 'Uses your Google AI Pro / Ultra subscription via gemini.google.com cookies. No API key, no per-request rate limit. Run Setup-Gemini-Subscription.command once to log in.',
     },
     'openrouter': {
         perVideo: 0.00,
@@ -80,6 +87,15 @@ const COST_GUIDE = {
  * provider auto-loads that provider's stored key — no re-typing needed.
  */
 const FALLBACK_PROVIDERS = [
+    {
+        id: 'gemini-subscription', name: 'Gemini · Subscription', requires_key: false,
+        models: [
+            'gemini-3-flash-plus', 'gemini-3-pro-plus', 'gemini-3-flash-thinking-plus',
+            'gemini-3-flash', 'gemini-3-pro',
+        ],
+        default_model: 'gemini-3-flash-plus',
+        notes: 'Your Google AI Pro subscription via gemini.google.com cookies — no API key, no quota. Run Setup-Gemini-Subscription.command once.',
+    },
     {
         id: 'gemini', name: 'Google Gemini', requires_key: true,
         // Free-tier models first so users with a fresh aistudio.google.com
@@ -186,13 +202,18 @@ export default function ProviderPicker({ onChange }) {
     const [providers, setProviders] = useState(FALLBACK_PROVIDERS);
     const [open, setOpen] = useState(false);
 
-    const [provider, setProvider] = useState(() => loadPref()?.provider || 'gemini');
+    const [provider, setProvider] = useState(() => loadPref()?.provider || 'gemini-subscription');
     const [model, setModel] = useState(() => loadPref()?.model || 'gemini-2.5-flash');
-    const [apiKey, setApiKey] = useState(() => loadKey(loadPref()?.provider || 'gemini'));
+    const [apiKey, setApiKey] = useState(() => loadKey(loadPref()?.provider || 'gemini-subscription'));
     const [showKey, setShowKey] = useState(false);
     const [savedFlash, setSavedFlash] = useState(false);
 
     const wrapRef = useRef(null);
+    // The dropdown panel renders via createPortal into document.body, so
+    // it is NOT a DOM descendant of wrapRef. The click-outside handler
+    // must check this ref too, or every click inside the panel (model
+    // dropdown, key input, Save) instantly closes it.
+    const panelRef = useRef(null);
     // Tracks the live-probe state for the Ollama picker so we can show
     // the user whether the daemon is reachable and how many models it
     // returned. Without this, "no models found" looks identical to
@@ -242,13 +263,17 @@ export default function ProviderPicker({ onChange }) {
                     count: live.length,
                     lastChecked: Date.now(),
                 });
-                // Snap to the first installed Ollama model if the
-                // saved one is no longer available.
+                // Snap to the first installed model ONLY for Ollama — its
+                // list comes from a live daemon (a saved model may no longer
+                // be installed). For every other provider the model field is
+                // free-text (the datalist is suggestions, not a closed set),
+                // so snapping would silently overwrite a valid model the user
+                // typed and route requests to a different one.
                 const cur = list.find((p) => p.id === provider);
-                if (cur && Array.isArray(cur.models) && cur.models.length > 0
-                    && !cur.models.includes(model)) {
+                if (provider === 'ollama' && cur && Array.isArray(cur.models)
+                    && cur.models.length > 0 && !cur.models.includes(model)) {
                     const next = cur.models[0];
-                    console.log(`[ProviderPicker] Saved model "${model}" not in live list for ${provider}; switching to "${next}".`);
+                    console.log(`[ProviderPicker] Saved Ollama model "${model}" not installed; switching to "${next}".`);
                     setModel(next);
                 }
             })
@@ -267,7 +292,9 @@ export default function ProviderPicker({ onChange }) {
     useEffect(() => {
         if (!open) return;
         const close = (e) => {
-            if (wrapRef.current && !wrapRef.current.contains(e.target)) setOpen(false);
+            const inTrigger = wrapRef.current && wrapRef.current.contains(e.target);
+            const inPanel = panelRef.current && panelRef.current.contains(e.target);
+            if (!inTrigger && !inPanel) setOpen(false);
         };
         window.addEventListener('mousedown', close);
         return () => window.removeEventListener('mousedown', close);
@@ -288,6 +315,12 @@ export default function ProviderPicker({ onChange }) {
         const next = providers.find((p) => p.id === pid);
         setModel(next?.default_model || next?.models?.[0] || '');
         setApiKey(loadKey(pid));
+        // Flash a visible "Saved" so the user knows their click landed.
+        // Without this, a misclick on the wrong tile is silent and the
+        // user's next pipeline call goes to the OLD provider — which
+        // they then have to debug from the network/log side.
+        setSavedFlash(true);
+        setTimeout(() => setSavedFlash(false), 2200);
     };
 
     const handleSave = () => {
@@ -319,16 +352,27 @@ export default function ProviderPicker({ onChange }) {
                 <ChevronDown size={12} className={'transition ' + (open ? 'rotate-180' : '')} />
             </button>
 
-            {/* Dropdown panel */}
-            {open && (
-                <div className="absolute z-50 mt-2 left-1/2 -translate-x-1/2 w-[min(92vw,560px)] rounded-2xl border border-white/10 bg-[#121214] shadow-2xl p-4 text-left">
+            {/* Dropdown panel rendered via React Portal so it escapes ANY
+                ancestor overflow:hidden (otherwise it gets clipped by the
+                Subtitle / Auto-Subtitle / SEO modal we live inside).
+                Position: fixed, viewport-centered, with a backdrop. */}
+            {open && createPortal(
+              <>
+                <div
+                  className="fixed inset-0 z-[9998] bg-black/40 backdrop-blur-sm"
+                  onClick={() => setOpen(false)}
+                  aria-hidden="true"
+                />
+                <div ref={panelRef} className="fixed z-[9999] left-1/2 top-[10vh] -translate-x-1/2 w-[min(96vw,640px)] max-h-[80vh] overflow-y-auto rounded-2xl border border-white/10 bg-[#121214] shadow-2xl p-4 text-left">
                     <div className="flex items-center justify-between mb-3">
                         <div>
                             <h3 className="text-sm font-semibold text-white">AI provider</h3>
                             <p className="text-[11px] text-zinc-500 mt-0.5">Saved per-provider in this browser. Stays until you change it.</p>
                         </div>
                         {savedFlash && (
-                            <span className="text-[11px] text-green-400 flex items-center gap-1"><Check size={12} /> Saved</span>
+                            <span className="text-xs font-semibold text-green-200 bg-green-500/20 border border-green-500/40 rounded-full px-3 py-1 flex items-center gap-1.5 animate-pulse">
+                                <Check size={14} /> Switched to {provider}
+                            </span>
                         )}
                     </div>
 
@@ -530,6 +574,8 @@ export default function ProviderPicker({ onChange }) {
                         </button>
                     </div>
                 </div>
+              </>,
+              document.body
             )}
         </div>
     );

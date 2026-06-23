@@ -257,7 +257,7 @@ def _welcome_html(full_name: Optional[str], app_url: str) -> str:
             Open Klipra →
           </a>
           <p style="font-size:12px;line-height:1.55;color:#6b7280;margin:14px 0 0 0;">
-            Free plan includes 5 jobs / month. No credit card required.
+            Free to use. No credit card required.
           </p>
         </td></tr>
 
@@ -335,7 +335,7 @@ THREE QUICK WINS TO START
 
 Open Klipra: {app_url}
 
-Free plan includes 5 jobs / month. No credit card required.
+Free to use. No credit card required.
 
 —
 You're receiving this because you just signed up for Klipra. If that

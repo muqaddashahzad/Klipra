@@ -3,7 +3,7 @@ import {
   Youtube, Upload, HardDrive, Link2, Loader2, Copy, Check, RotateCcw,
   AlertCircle, Tag, ListOrdered, Type, FileText, Sparkles, Search,
 } from 'lucide-react';
-import { getApiUrl } from '../config';
+import { getApiUrl, buildLlmHeaders } from '../config';
 
 function CopyBtn({ text, label = 'Copy', className = '' }) {
   const [done, setDone] = useState(false);
@@ -35,8 +35,11 @@ export default function StandaloneYouTubeSEO({ llmHeaders, homeBump = 0 }) {
   const [result, setResult] = useState(null);
   const [error, setError] = useState('');
 
-  const provider = llmHeaders?.['X-LLM-Provider'] || 'gemini';
-  const model = llmHeaders?.['X-LLM-Model'] || '';
+  // Mirror the LIVE provider choice (localStorage, written by ProviderPicker)
+  // so the on-page label matches what submit() actually sends.
+  const _liveLlm = buildLlmHeaders(llmHeaders);
+  const provider = _liveLlm['X-LLM-Provider'] || 'gemini';
+  const model = _liveLlm['X-LLM-Model'] || '';
 
   useEffect(() => { if (homeBump > 0) reset(); }, [homeBump]);
   const reset = () => {
@@ -89,7 +92,10 @@ export default function StandaloneYouTubeSEO({ llmHeaders, homeBump = 0 }) {
       else if (mode === 'url') fd.append('url', url.trim());
       else fd.append('local_path', localPath);
       fd.append('output_language', outLang);
-      const r = await fetch(getApiUrl('/api/standalone/seo'), { method: 'POST', body: fd, headers: llmHeaders });
+      // Read the live provider from localStorage at request time — the
+      // in-page picker persists there but doesn't re-render App.jsx, so the
+      // llmHeaders prop can be stale (picked Ollama, still hit Gemini → 429).
+      const r = await fetch(getApiUrl('/api/standalone/seo'), { method: 'POST', body: fd, headers: buildLlmHeaders(llmHeaders) });
       if (!r.ok) throw new Error((await r.text()) || 'Server rejected the request');
       const d = await r.json();
       setJobId(d.job_id);

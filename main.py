@@ -1509,7 +1509,17 @@ def get_viral_clips(
     if provider_id == "gemini":
         model_name = model_name or "gemini-2.5-flash"
         api_key = api_key or os.getenv("GEMINI_API_KEY", "")
-    if provider_id != "ollama" and not api_key:
+    # Providers that authenticate WITHOUT an api_key:
+    #   ollama              → local, no key
+    #   gemini-subscription → gemini.google.com cookies, no key (and it's
+    #                         wrapped in a FallbackProvider that drops to local
+    #                         Ollama if the cookie ever expires)
+    # The old check only exempted ollama, so a subscription user resuming the
+    # HITL-cleanup flow hit "no API key" here and the clip picker never even
+    # reached build_provider — blocking both the cookie auth AND its Ollama
+    # fallback. Mirror the keyless set used in app.py / transcript_utils.
+    _KEYLESS_PROVIDERS = {"ollama", "gemini-subscription"}
+    if provider_id not in _KEYLESS_PROVIDERS and not api_key:
         print(f"❌ Error: no API key provided for provider '{provider_id}'.")
         return None
 
@@ -1760,6 +1770,15 @@ if __name__ == '__main__':
     parser.add_argument('-o', '--output', type=str, help="Output directory or file (if processing whole video).")
     parser.add_argument('--keep-original', action='store_true', help="Keep the downloaded YouTube video.")
     parser.add_argument('--skip-analysis', action='store_true', help="Skip AI analysis and convert the whole video.")
+    parser.add_argument('--transcribe-only', action='store_true',
+                        help="PHASE 1 of human-in-the-loop cleanup: transcribe, write "
+                             "the raw transcript to <output>/_raw_transcript.json, then exit "
+                             "BEFORE AI cleanup so the user can clean it externally and resume.")
+    parser.add_argument('--cleaned-transcript', type=str, default=None,
+                        help="PHASE 2 of human-in-the-loop cleanup: load this transcript JSON "
+                             "instead of transcribing, and skip the in-app AI cleanup. The "
+                             "transcript came from the user's external cleanup, with original "
+                             "Whisper timings preserved.")
     
     args = parser.parse_args()
 
@@ -1789,8 +1808,14 @@ if __name__ == '__main__':
         input_video, video_title = download_youtube_video(args.url, output_dir)
     else:
         input_video = args.input
-        video_title = os.path.splitext(os.path.basename(input_video))[0]
-        
+        # Sanitize the local filename's stem the same way YouTube titles are
+        # sanitized. Without this, a source video whose name contains '?',
+        # '#', '*', etc. produces clip filenames like
+        # "Is AI a THREAT?_clip_1.mp4" — and the '?' breaks the /videos/ URL
+        # in the browser (query-string truncation) AND corrupts retrim/
+        # subtitle re-saves. sanitize_filename strips [<>:"/\|?*] and spaces.
+        video_title = sanitize_filename(os.path.splitext(os.path.basename(input_video))[0])
+
         if args.output and not args.skip_analysis:
             # For multi-clip runs, treat --output as an OUTPUT DIRECTORY (create it if needed).
             output_dir = _ensure_dir(args.output)
@@ -1813,10 +1838,39 @@ if __name__ == '__main__':
         output_file = args.output if args.output else os.path.join(output_dir, f"{video_title}_vertical.mp4")
         process_video_to_vertical(input_video, output_file)
     else:
-        # 3. Transcribe
-        transcript = transcribe_video(input_video)
+        # 3. Transcribe — OR load a user-cleaned transcript (phase 2).
+        _cleaned_path = getattr(args, "cleaned_transcript", None)
+        if _cleaned_path:
+            # PHASE 2: the user cleaned the transcript externally. Load it
+            # verbatim (original Whisper timings preserved by the backend) and
+            # skip both transcription and the in-app AI cleanup below.
+            with open(_cleaned_path, "r", encoding="utf-8") as _cf:
+                transcript = json.load(_cf)
+            print(f"📥 Loaded user-cleaned transcript "
+                  f"({len((transcript or {}).get('segments') or [])} segments) — "
+                  f"skipping transcribe + AI cleanup.")
+        else:
+            transcript = transcribe_video(input_video)
+
+            # 3a. HUMAN-IN-THE-LOOP PAUSE (phase 1). When --transcribe-only is
+            # set, write the raw transcript to the job output dir and EXIT
+            # before the AI cleanup. The backend flips the job to
+            # 'awaiting_cleanup'; the user cleans the transcript in an external
+            # AI and resumes via /api/process/continue, which re-runs the full
+            # pipeline with --cleaned-transcript.
+            if getattr(args, "transcribe_only", False):
+                try:
+                    raw_path = os.path.join(output_dir, "_raw_transcript.json")
+                    with open(raw_path, "w", encoding="utf-8") as _f:
+                        json.dump(transcript, _f, ensure_ascii=False, indent=2)
+                    print(f"PAUSE: transcript ready ({len((transcript or {}).get('segments') or [])} segments) → {raw_path}")
+                except Exception as _e:
+                    print(f"❌ Failed to write raw transcript: {_e}", file=sys.stderr)
+                    sys.exit(1)
+                sys.exit(0)
 
         # 3b. AI cleanup pass on the Whisper transcript BEFORE clip selection.
+        #     (Forced to skip-cleanup in phase 2 — see script_mode below.)
         #
         # This is the critical step that determines clip quality. Whisper's
         # raw output is full of mishears, mangled proper nouns, and
@@ -1839,7 +1893,9 @@ if __name__ == '__main__':
         #
         # Opt out via OPENSHORTS_TRANSCRIPT_SCRIPT=skip-cleanup if you
         # really want raw Whisper output.
-        script_mode = (os.getenv("OPENSHORTS_TRANSCRIPT_SCRIPT") or "auto").lower()
+        # Phase 2 (user-cleaned transcript) forces skip-cleanup regardless of
+        # the env var, so the user's text is never re-processed.
+        script_mode = "skip-cleanup" if _cleaned_path else (os.getenv("OPENSHORTS_TRANSCRIPT_SCRIPT") or "auto").lower()
         non_latin = {
             "hi", "ur", "ar", "fa", "ps", "ku",
             "bn", "pa", "ta", "te", "ml", "kn", "gu", "mr", "or",
@@ -2055,8 +2111,18 @@ if __name__ == '__main__':
                     '-c:a', 'aac',
                     clip_temp_path
                 ]
-                subprocess.run(cut_command, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
-                
+                cut_proc = subprocess.run(cut_command, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+                # Guard: if the cut failed or produced an empty/tiny file, skip
+                # this clip instead of feeding a broken file into reframing
+                # (which would corrupt the clip or crash the rest of the batch).
+                if cut_proc.returncode != 0 or not (os.path.isfile(clip_temp_path) and os.path.getsize(clip_temp_path) > 1024):
+                    _err = (cut_proc.stderr or b"").decode("utf-8", errors="replace")[-500:]
+                    print(f"   ⚠️  Clip {i+1} cut failed (rc={cut_proc.returncode}) — skipping. {_err}")
+                    if os.path.exists(clip_temp_path):
+                        try: os.remove(clip_temp_path)
+                        except OSError: pass
+                    continue
+
                 # Process vertical
                 success = process_video_to_vertical(clip_temp_path, clip_final_path)
                 

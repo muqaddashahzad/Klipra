@@ -194,7 +194,18 @@ def _shake(start: float, end: float, whole: bool) -> str:
     else:
         env = _ease_window(start, end)
     # 12 Hz wobble with peak ±10 px amplitude (now scaled by env).
+    #
+    # Pad the frame by 10px on every side first, then crop a SOURCE-SIZED
+    # window back out with a moving offset. The old `crop=iw-20:ih-20`
+    # shrank every output frame below the source size, so the muxer rescaled
+    # — and thus visibly re-framed — the WHOLE clip, not just the shake
+    # region (the bug the user reported). With the pad, output dims == source.
+    # Outside the region env=0 ⇒ the offset is centred (x=y=10) ⇒ the crop
+    # lands exactly on the original content ⇒ those frames are pixel-identical
+    # to the source. Inside the region the window jitters ±10px (a thin dark
+    # edge may peek in at the peaks — the classic earthquake look).
     return (
+        f"pad=w=iw+20:h=ih+20:x=10:y=10,"
         f"crop=w=iw-20:h=ih-20:"
         f"x=10+10*sin(2*PI*t*12)*{env}:"
         f"y=10+10*cos(2*PI*t*12)*{env}"

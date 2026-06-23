@@ -383,11 +383,23 @@ def destroy_session(token: str) -> None:
 
 
 # ----- Plan / usage gating ----------------------------------------------
+#
+# NOTE: this monthly-job quota is SCAFFOLDING for a future hosted/paid
+# tier. It is intentionally NOT wired into the job-creation path. The
+# current build is self-hosted and keyless (/api/process has no auth and
+# resolves no user), so gating it on a per-user counter would only lock
+# the operator out of their own machine. `can_run_job` / `record_job_usage`
+# are kept here, callable, so a future authenticated SaaS deployment can
+# enable them at the route layer — but until then nothing calls them, and
+# no welcome email should advertise a job cap that isn't enforced (the
+# "5 jobs / month" line in email_utils.py was removed for that reason).
 
 def can_run_job(user_id: int) -> tuple[bool, str]:
     """Return (allowed, reason). Resets monthly counter if a new period
     has started since `jobs_period_start`. Counter is incremented by
-    `record_job_usage` after the job actually starts."""
+    `record_job_usage` after the job actually starts.
+
+    Not currently called — see the section note above."""
     user = get_user_by_id(user_id)
     if not user:
         return False, "User not found."

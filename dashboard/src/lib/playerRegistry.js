@@ -23,11 +23,24 @@ let installed = false;
 const onPlayCapture = (e) => {
     const target = e.target;
     if (!target || target.tagName !== 'VIDEO') return;
-    // Pause every other <video> currently in the DOM.
+    // The problem this solves is DOUBLE AUDIO, so the rule is about
+    // audio, not playback:
+    //   • A MUTED video starting (the Live Analysis ambient loop, the
+    //     synced source preview) can't bleed audio — pause nothing.
+    //   • An UNMUTED video starting pauses only the other UNMUTED
+    //     videos. Muted ones (the synced analysis preview that is
+    //     SUPPOSED to run alongside the playing clip) keep going.
+    //
+    // The old "pause every other video" version broke clip playback on
+    // the results page: clicking ▶ on a clip started the muted synced
+    // analysis preview, whose own 'play' event re-entered this listener
+    // and paused the very clip the user just started — every clip froze
+    // at 0:00 while the modals (no synced sibling) played fine.
+    if (target.muted || target.volume === 0) return;
     const videos = document.querySelectorAll('video');
     videos.forEach((v) => {
         if (v === target) return;
-        if (!v.paused) {
+        if (!v.paused && !v.muted && v.volume > 0) {
             try { v.pause(); } catch { /* element may have been removed */ }
         }
     });

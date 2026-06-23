@@ -1,6 +1,6 @@
 import React, { useState, useRef, useEffect } from 'react';
 import { Upload, Languages, Loader2, Download, RotateCcw, Lightbulb, Check, AlertCircle, ChevronLeft, X, Sparkles } from 'lucide-react';
-import { getApiUrl } from '../config';
+import { getApiUrl, buildLlmHeaders } from '../config';
 import StandalonePastList from './StandalonePastList';
 import ProcessingPreview from './ProcessingPreview';
 import StandaloneReframeKeyframeModal from './StandaloneReframeKeyframeModal';
@@ -396,7 +396,9 @@ export default function StandaloneDub({ llmHeaders, elevenLabsKey, homeBump = 0 
                 method: 'POST',
                 headers: {
                     'Content-Type': 'application/json',
-                    ...(llmHeaders || {}),
+                    // Live provider from localStorage at request time, not
+                    // the stale prop (in-page picker doesn't re-render App).
+                    ...buildLlmHeaders(llmHeaders),
                     ...(elevenLabsKey ? { 'X-ElevenLabs-Key': elevenLabsKey } : {}),
                 },
                 body: JSON.stringify({
@@ -501,7 +503,9 @@ export default function StandaloneDub({ llmHeaders, elevenLabsKey, homeBump = 0 
             const res = await fetch(getApiUrl('/api/standalone/dub'), {
                 method: 'POST',
                 headers: {
-                    ...(llmHeaders || {}),
+                    // Live provider from localStorage at request time, not
+                    // the stale prop (in-page picker doesn't re-render App).
+                    ...buildLlmHeaders(llmHeaders),
                     ...(elevenLabsKey ? { 'X-ElevenLabs-Key': elevenLabsKey } : {}),
                 },
                 body: fd,
@@ -947,7 +951,7 @@ export default function StandaloneDub({ llmHeaders, elevenLabsKey, homeBump = 0 
                                     try {
                                         const r = await fetch(getApiUrl(`/api/standalone/${jobId}/resume`), {
                                             method: 'POST',
-                                            headers: { 'Content-Type': 'application/json', ...(llmHeaders || {}) },
+                                            headers: { 'Content-Type': 'application/json', ...buildLlmHeaders(llmHeaders) },
                                         });
                                         if (r.ok) {
                                             setStatus('translating');

@@ -68,13 +68,59 @@ def llm_rewrite_transcript(
     """
     from llm import build_provider, LLMError
 
-    if provider_id != "ollama" and not api_key:
+    # Providers that authenticate WITHOUT an api_key:
+    #   ollama              → local, no key
+    #   gemini-subscription → gemini.google.com cookies, no key
+    # Without gemini-subscription here, a subscription user (empty api_key)
+    # would short-circuit and get the ORIGINAL Urdu back — the LLM rewrite
+    # (roman/hinglish/urglish/translate) never runs.
+    _KEYLESS_PROVIDERS = {"ollama", "gemini-subscription"}
+    if provider_id not in _KEYLESS_PROVIDERS and not api_key:
         print("⚠️  No LLM key for transcript rewrite — using original")
         return transcript
 
     segments = transcript.get("segments") or []
     if not segments:
         return transcript
+
+    # ── Already-Latin guard ──────────────────────────────────────────────
+    # Transliteration (roman / urglish / hinglish) only has work to do when
+    # the input contains NON-Latin script (Urdu/Arabic, Devanagari, etc.).
+    # If Whisper produced ENGLISH text (e.g. it auto-detected the audio as
+    # English, or the user didn't force a source language), there is nothing
+    # to romanize — every word is already English, so the prompt keeps it
+    # verbatim and the output looks "unchanged / still English". That silent
+    # no-op is the #1 "Urglish gives me English" confusion. Detect it, flag it
+    # on the returned transcript (so the API/UI can tell the user to
+    # re-transcribe with Urdu/Hindi as the SOURCE language), and skip the LLM
+    # call entirely — running it would just cost tokens to return the input.
+    if mode in ("roman", "hinglish", "urglish"):
+        _joined = " ".join((s.get("text") or "") for s in segments)
+        # Any char in the Urdu/Arabic, Devanagari, or other common non-Latin
+        # transliteration source ranges?
+        _has_source_script = any(
+            ("؀" <= ch <= "ۿ")    # Arabic / Urdu
+            or ("ऀ" <= ch <= "ॿ")  # Devanagari (Hindi)
+            or ("ঀ" <= ch <= "෿")  # Bengali..Sinhala (other Indic)
+            or ("Ѐ" <= ch <= "ӿ")  # Cyrillic
+            or ("一" <= ch <= "鿿")  # CJK
+            for ch in _joined
+        )
+        if not _has_source_script:
+            print(
+                "⚠️  Transliteration skipped: the transcript is already in "
+                "Latin/English script — there is no Urdu/Hindi script to "
+                "romanize. Re-transcribe with the correct SOURCE language "
+                "(e.g. 'Urdu') to get Roman Urdu output."
+            )
+            out = dict(transcript)
+            out["transliteration_warning"] = (
+                "This transcript is in English (Latin script), so there's "
+                "nothing to transliterate into Roman Urdu. In setup, set "
+                "Source language to 'Urdu' (not Auto-detect or 'Roman Urdu + "
+                "English mixed') and re-transcribe — then Urglish will romanize it."
+            )
+            return out
 
     # Build a full-clip context preview so each batch sees what's around it.
     # Truncate hard at ~2000 chars to keep prompt cost in check.
@@ -511,19 +557,33 @@ def llm_rewrite_transcript(
         # never silently disappear.
         if not new_text and original_text:
             new_text = original_text
+        # Capture the REAL Whisper word timings BEFORE we overwrite words.
+        orig_words = seg.get("words") or []
         seg["text"] = new_text
-        # Redistribute words evenly across original [start, end] so the
-        # SRT generator's word-level timing still works.
         s, e = float(seg.get("start", 0)), float(seg.get("end", 0))
         tokens = new_text.split()
         if not tokens or e <= s:
             seg["words"] = []
             continue
-        per = (e - s) / len(tokens)
-        seg["words"] = [
-            {"word": tok, "start": s + idx * per, "end": s + (idx + 1) * per}
-            for idx, tok in enumerate(tokens)
-        ]
+        # If the rewrite kept the same NUMBER of words (common for cleanup /
+        # roman transliteration), reuse each word's ORIGINAL start/end so the
+        # karaoke / word-highlight sweep follows the real speech rhythm
+        # instead of a robotic constant rate. Otherwise fall back to an even
+        # redistribution across the segment.
+        if (len(orig_words) == len(tokens)
+                and all(isinstance(w, dict) and w.get("start") is not None
+                        and w.get("end") is not None for w in orig_words)):
+            seg["words"] = [
+                {"word": tok, "start": float(orig_words[idx]["start"]),
+                 "end": float(orig_words[idx]["end"])}
+                for idx, tok in enumerate(tokens)
+            ]
+        else:
+            per = (e - s) / len(tokens)
+            seg["words"] = [
+                {"word": tok, "start": s + idx * per, "end": s + (idx + 1) * per}
+                for idx, tok in enumerate(tokens)
+            ]
     new_transcript["text"] = " ".join(
         seg.get("text", "") for seg in new_transcript.get("segments", [])
     )

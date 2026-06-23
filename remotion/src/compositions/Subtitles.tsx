@@ -15,10 +15,18 @@ interface SubtitlesProps {
   config: SubtitleConfig;
 }
 
+// Match the BURN's vertical placement so the preview == the burned mp4.
+// burn_subtitles() uses ASS alignment + margin_v = max(40, 6% of video_h):
+//   top    → alignment 8, text top ~6% from the top edge
+//   middle → alignment 5, vertically centred
+//   bottom → alignment 2, text bottom ~6% from the bottom edge
+// The old 12%/45%/10% values placed the preview captions noticeably higher
+// (top) and higher (bottom) than the burn, which is the "position differs"
+// the user saw. 6% top / 6% bottom / centred middle lines them up.
 const POSITION_MAP: Record<string, React.CSSProperties> = {
-  top: { top: "12%", bottom: "auto" },
-  middle: { top: "45%", bottom: "auto" },
-  bottom: { bottom: "10%", top: "auto" },
+  top: { top: "6%", bottom: "auto" },
+  middle: { top: "50%", bottom: "auto", transform: "translateY(-50%)" },
+  bottom: { bottom: "6%", top: "auto" },
 };
 
 export const Subtitles: React.FC<SubtitlesProps> = ({ config }) => {
@@ -103,15 +111,22 @@ const SubtitleBlock: React.FC<SubtitleBlockProps> = ({
           display: "flex",
           flexWrap: "wrap",
           justifyContent: "center",
-          gap: "6px 8px",
-          maxWidth: "85%",
+          // Gap scales with font size so word spacing stays readable at any size.
+          // Vertical gap is half horizontal (looks balanced when wrapping).
+          gap: `${(style.fontSize || 24) * 0.25}px ${(style.fontSize || 24) * 0.4}px`,
+          // 90% matches the burn's drawable width (video_w − 2×margin_h, where
+          // margin_h ≈ 5% per side) so lines wrap at the same point as the
+          // burned mp4. Was 85%, which broke lines slightly earlier.
+          maxWidth: "90%",
           ...bgStyle,
         }}
       >
         {block.words.map((word, i) => (
           <WordSpan
             key={i}
-            word={word.text}
+            // Trim Whisper's per-word whitespace artifacts (Whisper often
+            // emits " hello" with a leading space which HTML collapses).
+            word={(word.text || '').trim()}
             isActive={i === activeIndex}
             style={style}
             fontStack={fontStack}

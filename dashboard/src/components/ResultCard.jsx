@@ -1,6 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import { Download, Share2, Instagram, Youtube, Video, CheckCircle, AlertCircle, X, Loader2, Copy, Wand2, Type, Calendar, Clock, Languages, Scissors, MoveHorizontal, Undo2, AlertTriangle, Sparkles } from 'lucide-react';
-import { getApiUrl } from '../config';
+import { getApiUrl, encodeClipPath, clipFilenameFromUrl } from '../config';
 import SubtitleModal from './SubtitleModal';
 import HookModal from './HookModal';
 import TranslateModal from './TranslateModal';
@@ -73,21 +73,11 @@ export default function ResultCard({ clip, index, jobId, uploadPostKey, uploadUs
     // back to the backend, which expects the unencoded form on disk.
     const safePlayerSrc = (url) => {
         if (!url || typeof url !== 'string') return '';
-        try {
-            // Encode each path segment individually so '/' and '?' stay
-            // as separators. We split on '?' to keep the cache-bust
-            // query string intact.
-            const [base, query] = url.split('?');
-            const encodedBase = base.split('/').map((seg, i) =>
-                // First two segments are protocol+host (http://localhost)
-                // and the leading empty (after '//'). Encode everything
-                // after the path begins.
-                i < 3 || /^[a-z]+:$/i.test(seg) || seg === '' ? seg : encodeURIComponent(seg)
-            ).join('/');
-            return query ? `${encodedBase}?${query}` : encodedBase;
-        } catch {
-            return url;
-        }
+        // Route through the SAME idempotent encoder getApiUrl uses. Because
+        // encodeClipPath is idempotent (decode-then-encode per segment),
+        // applying it here on top of getApiUrl's output yields the SAME
+        // correct single-encoded URL — no '%3F' -> '%253F' double-encoding.
+        return encodeClipPath(url);
     };
 
     // Live timer state — updated as the clip plays. We display it as an
@@ -101,6 +91,13 @@ export default function ResultCard({ clip, index, jobId, uploadPostKey, uploadUs
     const [showReframe, setShowReframe] = useState(false);
     const [liveClip, setLiveClip] = useState(clip);
     useEffect(() => { setLiveClip(clip); }, [clip]);
+
+    // Reframe pans a single continuous crop window over time. A clip
+    // stitched from disjoint source segments (multi-range retrim) has no
+    // single continuous timeline to pan across, so keyframed reframe would
+    // map keyframe times onto the wrong source frames. Gate it off and tell
+    // the user to flatten first. The backend rejects it too (defence in depth).
+    const isMultiRange = Array.isArray(liveClip?.ranges) && liveClip.ranges.length > 1;
 
     // Social-connect modal — opened automatically by handlePost when the
     // selected platforms aren't already linked to the user's profile.
@@ -144,9 +141,14 @@ export default function ResultCard({ clip, index, jobId, uploadPostKey, uploadUs
             if (!r.ok) throw new Error(await r.text());
             const data = await r.json();
             setCurrentAspect(data.aspect || target);
-            // Force the <video> tag to re-fetch by appending a cache-bust
-            // — same trick the rest of Klipra uses for re-renders.
-            clip.video_url = data.clip_url + (data.clip_url.includes('?') ? '&' : '?') + 'v=' + Date.now();
+            // Force the <video> tag to re-fetch by appending a cache-bust,
+            // AND actually point the player at the freshly-rendered file —
+            // setting clip.video_url alone never updated the <video> src, so
+            // the chip turned green but the preview kept the old aspect.
+            const fresh = data.clip_url + (data.clip_url.includes('?') ? '&' : '?') + 'v=' + Date.now();
+            clip.video_url = fresh;
+            setCurrentVideoUrl(getApiUrl(fresh));
+            if (videoRef.current) videoRef.current.load();
         } catch (e) {
             setAspectError(e.message || String(e));
         } finally {
@@ -260,7 +262,7 @@ export default function ResultCard({ clip, index, jobId, uploadPostKey, uploadUs
                 body: JSON.stringify({
                     job_id: jobId,
                     clip_index: index,
-                    input_filename: currentVideoUrl.split('?')[0].split('/').pop(),
+                    input_filename: clipFilenameFromUrl(currentVideoUrl),
                     enable_sfx: autoEditSfx,
                     sfx_volume: autoEditSfxVolume,
                 })
@@ -331,7 +333,7 @@ export default function ResultCard({ clip, index, jobId, uploadPostKey, uploadUs
                     // behaviour) instead of producing surprises.
                     animation: options.animation || 'none',
                     highlight_color: options.highlightColor || '#FFDD00',
-                    input_filename: currentVideoUrl.split('?')[0].split('/').pop()
+                    input_filename: clipFilenameFromUrl(currentVideoUrl)
                 })
             });
 
@@ -376,7 +378,12 @@ export default function ResultCard({ clip, index, jobId, uploadPostKey, uploadUs
                     bg_color: payload.bg_color || '#FFFFFF',
                     bg_opacity: typeof payload.bg_opacity === 'number' ? payload.bg_opacity : 0.94,
                     y_offset: typeof payload.y_offset === 'number' ? payload.y_offset : null,
-                    input_filename: currentVideoUrl.split('?')[0].split('/').pop()
+                    // 2-D placement (corner anchor + px margins).
+                    h_align: payload.h_align || 'center',
+                    v_align: payload.v_align || null,
+                    margin_x: typeof payload.margin_x === 'number' ? payload.margin_x : 40,
+                    margin_y: typeof payload.margin_y === 'number' ? payload.margin_y : 40,
+                    input_filename: clipFilenameFromUrl(currentVideoUrl)
                 })
             });
 
@@ -410,7 +417,7 @@ export default function ResultCard({ clip, index, jobId, uploadPostKey, uploadUs
                 job_id: jobId,
                 clip_index: index,
                 target_language: options.targetLanguage,
-                input_filename: currentVideoUrl.split('?')[0].split('/').pop(),
+                input_filename: clipFilenameFromUrl(currentVideoUrl),
                 dub_provider: dubProvider,
                 voice: options.voice || null,
                 keep_original: !!options.keepOriginal,
@@ -759,11 +766,13 @@ export default function ResultCard({ clip, index, jobId, uploadPostKey, uploadUs
                         Cyan/sky to evoke camera lens / aperture motion. */}
                     <button
                         onClick={() => setShowReframe(true)}
-                        disabled={isEditing}
-                        className="col-span-2 py-2 bg-gradient-to-r from-sky-500 to-cyan-600 hover:from-sky-400 hover:to-cyan-500 text-white rounded-lg text-xs font-bold shadow-lg shadow-cyan-500/20 transition-all active:scale-[0.98] flex items-center justify-center gap-2 mb-1 truncate px-1"
-                        title="Pan the 9:16 crop window over time — face → screen → face, etc."
+                        disabled={isEditing || isMultiRange}
+                        className="col-span-2 py-2 bg-gradient-to-r from-sky-500 to-cyan-600 hover:from-sky-400 hover:to-cyan-500 text-white rounded-lg text-xs font-bold shadow-lg shadow-cyan-500/20 transition-all active:scale-[0.98] flex items-center justify-center gap-2 mb-1 truncate px-1 disabled:opacity-40 disabled:cursor-not-allowed"
+                        title={isMultiRange
+                            ? "Reframe is unavailable on a multi-segment clip — flatten it to a single range first (Edit timing)."
+                            : "Pan the 9:16 crop window over time — face → screen → face, etc."}
                     >
-                        <MoveHorizontal size={14} /> Reframe (pan focus)
+                        <MoveHorizontal size={14} /> {isMultiRange ? 'Reframe (single-range only)' : 'Reframe (pan focus)'}
                     </button>
 
                     {/* AI Magic — motion graphics + SFX. Violet to
@@ -1040,8 +1049,8 @@ export default function ResultCard({ clip, index, jobId, uploadPostKey, uploadUs
                 videoUrl={safePlayerSrc(currentVideoUrl)}
                 jobId={jobId}
                 clipIndex={index}
-                inputFilename={currentVideoUrl.split('?')[0].split('/').pop()}
-                durationSec={clipDuration}
+                inputFilename={clipFilenameFromUrl(currentVideoUrl)}
+                durationSec={liveClip?.merged_duration ?? (((liveClip?.end ?? 0) - (liveClip?.start ?? 0)) || clipDuration)}
                 onApplied={(newUrl) => {
                     setCurrentVideoUrl(getApiUrl(newUrl));
                     if (videoRef.current) videoRef.current.load();
@@ -1049,23 +1058,30 @@ export default function ResultCard({ clip, index, jobId, uploadPostKey, uploadUs
                 }}
             />
 
-            <SubtitleModal
-                isOpen={showSubtitleModal}
-                onClose={() => setShowSubtitleModal(false)}
-                onGenerate={handleSubtitle}
-                isProcessing={isSubtitling}
-                videoUrl={safePlayerSrc(currentVideoUrl)}
-                jobId={jobId}
-                clipIndex={index}
-                existingHook={activeLayers.hook}
-                currentVideoFilename={currentVideoUrl.split('?')[0].split('/').pop()}
-                llmHeaders={llmHeaders}
-                // When the user just retrimmed this clip, the backend
-                // sets subtitles_invalidated_at on the clip record so
-                // the modal can show the "Regenerate first" banner
-                // instead of silently burning stale captions.
-                subtitlesInvalidatedAt={liveClip?.subtitles_invalidated_at || null}
-            />
+            {/* Conditionally mounted so each open starts from a clean slate.
+                Kept mounted-while-open only — when closed the component
+                unmounts and its internal draft state (edited captions, style
+                tweaks, the chosen position) is discarded instead of leaking
+                into the next clip's modal. */}
+            {showSubtitleModal && (
+                <SubtitleModal
+                    isOpen={showSubtitleModal}
+                    onClose={() => setShowSubtitleModal(false)}
+                    onGenerate={handleSubtitle}
+                    isProcessing={isSubtitling}
+                    videoUrl={safePlayerSrc(currentVideoUrl)}
+                    jobId={jobId}
+                    clipIndex={index}
+                    existingHook={activeLayers.hook}
+                    currentVideoFilename={clipFilenameFromUrl(currentVideoUrl)}
+                    llmHeaders={llmHeaders}
+                    // When the user just retrimmed this clip, the backend
+                    // sets subtitles_invalidated_at on the clip record so
+                    // the modal can show the "Regenerate first" banner
+                    // instead of silently burning stale captions.
+                    subtitlesInvalidatedAt={liveClip?.subtitles_invalidated_at || null}
+                />
+            )}
 
             <HookModal
                 isOpen={showHookModal}

@@ -320,6 +320,21 @@ def transcribe_audio(video_path):
     Transcribe audio from a video file using faster-whisper.
     Returns transcript in the same format as main.py for compatibility.
     """
+    # Native-Mac GPU sidecar first (large-v3-turbo on Metal) — better
+    # accuracy AND much faster than the CPU "base" fallback below. Same
+    # payload shape, so callers don't care which path produced it.
+    try:
+        from main import _try_whisper_sidecar
+        side = _try_whisper_sidecar(video_path)
+        if side and side.get("segments"):
+            for seg in side["segments"]:
+                for w in seg.get("words") or []:
+                    w["word"] = (w.get("word") or "").strip()
+            print(f"✅ Transcription complete (GPU sidecar). Language: {side.get('language')}")
+            return {"segments": side["segments"], "language": side.get("language") or ""}
+    except Exception as _side_err:
+        print(f"ℹ️  Sidecar unavailable ({_side_err}) — using CPU whisper.")
+
     from faster_whisper import WhisperModel
 
     print(f"🎙️  Transcribing audio from: {video_path}")
@@ -416,6 +431,29 @@ def _longest_wrapped_line_chars(srt_path, max_line=MAX_LINE_CHARS, max_lines=MAX
             wrapped = wrap_to_two_lines(joined, max_line=max_line, max_lines=max_lines)
         for line in wrapped.split('\\N'):
             longest = max(longest, len(line))
+    return longest
+
+
+def _longest_block_chars(srt_path):
+    """Longest CAPTION BLOCK (whole cue) length in characters, ignoring line
+    wrapping. Drives the two-line fit shrink in burn_subtitles: we keep the
+    user's chosen font size and only shrink when a whole caption can't fit
+    across two wrapped lines. This mirrors the React preview's
+    longestSegmentChars() so the burned mp4 == the on-screen preview, and it
+    means the font-size slider actually changes the burned size (the old
+    one-line shrink pinned it to 'largest that fits one line')."""
+    try:
+        with open(srt_path, 'r', encoding='utf-8') as f:
+            raw = f.read()
+    except OSError:
+        return 0
+    longest = 0
+    for chunk in raw.strip().split('\n\n'):
+        lines = chunk.strip().split('\n')
+        if len(lines) < 3:
+            continue
+        joined = ' '.join(ln for ln in lines[2:] if ln.strip())
+        longest = max(longest, len(joined))
     return longest
 
 
@@ -518,7 +556,8 @@ def wrap_to_two_lines(text, max_line=MAX_LINE_CHARS, max_lines=MAX_LINES):
 
 
 def generate_srt_per_segment(transcript, clip_start, clip_end, output_path,
-                             max_chars=MAX_LINE_CHARS, max_duration=3.0):
+                             max_chars=MAX_LINE_CHARS, max_duration=3.0,
+                             split_long=True):
     """Emit ONE SRT block per Whisper segment — using the segment's real
     [start,end] timing from Whisper.
 
@@ -528,9 +567,18 @@ def generate_srt_per_segment(transcript, clip_start, clip_end, output_path,
     words got mangled, so this gives perfect SEGMENT-level subtitle
     sync — the only sync that actually shows up to the viewer.
 
-    A segment is split into multiple SRT blocks if it's long (>4 s) or
-    has a lot of text (>42 chars), so subtitles don't sit on screen for
-    a paragraph.
+    split_long=True (default): a segment is split into multiple SRT blocks
+    if it's long (> max_duration) or has a lot of text (> max_chars), so
+    subtitles don't sit on screen for a paragraph.
+
+    split_long=False: emit EXACTLY one block per incoming segment, never
+    re-splitting. Use this when the caller's segments are ALREADY the final
+    on-screen captions (e.g. the standalone subtitle editor, which pre-splits
+    via _split_long_segments and lets the user split/merge in the timeline).
+    Re-splitting them here desynced the burn from the preview: the preview
+    shrinks the font to fit the WHOLE segment on two lines, but the re-split
+    blocks are short enough to skip shrinking, so the burn rendered the font
+    LARGER than the preview/selected size. Rendering 1:1 keeps burn == preview.
     """
     blocks = []
     for seg in transcript.get('segments', []):
@@ -544,8 +592,9 @@ def generate_srt_per_segment(transcript, clip_start, clip_end, output_path,
         text = (seg.get('text') or '').strip()
         if not text:
             continue
-        # If the segment is short enough, emit as one block.
-        if len(text) <= max_chars and (e - s) <= max_duration:
+        # Emit as one block when re-splitting is disabled, or the segment
+        # is already short enough.
+        if not split_long or (len(text) <= max_chars and (e - s) <= max_duration):
             blocks.append((s, e, text))
             continue
         # Otherwise split into roughly equal sub-blocks at word
@@ -598,25 +647,31 @@ def generate_srt(transcript, clip_start, clip_end, output_path, max_chars=20, ma
     block_start = None
     
     for i, word in enumerate(words):
+        # Read timings defensively — a single word missing start/end must NOT
+        # KeyError and abort the entire burn. Skip malformed words instead.
+        ws = word.get('start')
+        we = word.get('end')
+        if ws is None or we is None:
+            continue
         # Adjust times relative to clip
-        start = max(0, word['start'] - clip_start)
-        end = max(0, word['end'] - clip_start)
-        
+        start = max(0, ws - clip_start)
+        end = max(0, we - clip_start)
+
         # Clip to video duration logic handled by ffmpeg usually, but good to be safe
-        
+
         if not current_block:
             current_block.append(word)
             block_start = start
         else:
             # Decide whether to close block
-            current_text_len = sum(len(w['word']) + 1 for w in current_block)
+            current_text_len = sum(len((w.get('word') or '')) + 1 for w in current_block)
             duration = end - block_start
-            
-            if current_text_len + len(word['word']) > max_chars or duration > max_duration:
+
+            if current_text_len + len((word.get('word') or '')) > max_chars or duration > max_duration:
                 # Finalize current block
                 # End time of block is start of this word (gap) or end of last word?
                 # Usually end of last word.
-                block_end = current_block[-1]['end'] - clip_start
+                block_end = current_block[-1].get('end', clip_start) - clip_start
                 
                 # Strip per-word whitespace before joining — Whisper often
                 # emits leading spaces in word.text, which produces double
@@ -632,8 +687,8 @@ def generate_srt(transcript, clip_start, clip_end, output_path, max_chars=20, ma
     
     # Final block
     if current_block:
-        block_end = current_block[-1]['end'] - clip_start
-        text = " ".join([w['word'] for w in current_block]).strip()
+        block_end = current_block[-1].get('end', clip_start) - clip_start
+        text = " ".join([(w.get('word') or '') for w in current_block]).strip()
         srt_content += format_srt_block(index, block_start, block_end, text)
         
     with open(output_path, 'w', encoding='utf-8') as f:
@@ -870,7 +925,8 @@ def _resolve_animation_style_overrides(animation, primary, highlight_ass_colour,
 
 def srt_to_ass(srt_path, ass_path, *, video_w, video_h, alignment, fontname,
                fontsize, primary, outline_colour, back_colour, border_style,
-               outline_width, bold, margin_v,
+               outline_width, bold, margin_v, margin_h=None,
+               max_line_chars=MAX_LINE_CHARS,
                animation='none', highlight_colour=None,
                # When set, every Dialogue is emitted with a \pos(x, y)
                # override that anchors the VISUAL CENTRE of the text at
@@ -898,6 +954,12 @@ def srt_to_ass(srt_path, ass_path, *, video_w, video_h, alignment, fontname,
       `highlight_colour` is the already-converted ASS &HAABBGGRR
       string for the user-picked highlight (yellow by default).
     """
+    # Horizontal margins — scale with video width so narrow vertical (9:16)
+    # frames get proportionally larger margins and text never bleeds off-edge.
+    # 5 % per side, floored at 40 px (tiny videos), capped at 100 px (wide).
+    if margin_h is None:
+        margin_h = max(40, min(int(video_w * 0.05), 100))
+
     # 1. Read SRT, extract blocks
     with open(srt_path, 'r', encoding='utf-8') as f:
         raw = f.read()
@@ -920,10 +982,12 @@ def srt_to_ass(srt_path, ass_path, *, video_w, video_h, alignment, fontname,
             # If the SRT already had explicit line breaks we honour up
             # to two of them, otherwise we re-flow the joined text.
             srt_lines = [ln for ln in lines[2:] if ln.strip()]
-            if 1 < len(srt_lines) <= MAX_LINES and all(len(ln) <= MAX_LINE_CHARS for ln in srt_lines):
+            if 1 < len(srt_lines) <= MAX_LINES and all(len(ln) <= max_line_chars for ln in srt_lines):
                 text = '\\N'.join(srt_lines[:MAX_LINES])
             else:
-                text = wrap_to_two_lines(raw)
+                # Wrap to ≤2 lines at the caller's font-size-aware width so
+                # medium captions become two big lines instead of one tiny one.
+                text = wrap_to_two_lines(raw, max_line=max_line_chars)
             # Escape ASS special chars in dialogue text.
             text = text.replace('{', '\\{').replace('}', '\\}')
             blocks.append((start, end, text))
@@ -968,11 +1032,24 @@ def srt_to_ass(srt_path, ass_path, *, video_w, video_h, alignment, fontname,
     # uncoloured (no box) because BorderStyle stays at 1 on Default.
     box_style_row = ""
     if (animation or "").lower() == "word-box" and highlight_colour:
-        box_back = highlight_colour
+        # CRITICAL: with BorderStyle=3 (opaque box) libass fills the box from
+        # OutlineColour (\3c) — NOT BackColour (\4c, which is only the box's
+        # drop-shadow). The old code put the highlight in BackColour, leaving
+        # OutlineColour the dark default, so the active word got the SAME dark
+        # box as every word and never turned red. Fix: put the highlight in
+        # OutlineColour (the actual fill), keep the glyph white (matches the
+        # preview's white-on-red), and give the box real padding — Outline=1
+        # was sub-pixel at 1080x1920 so even the right colour wouldn't show a
+        # visible plate.
+        box_fill = highlight_colour
+        try:
+            box_pad = max(int(float(style_outline_width or 0)), 6)
+        except (TypeError, ValueError):
+            box_pad = 6
         box_style_row = (
-            f"Style: Box,{fontname},{fontsize},{style_primary},{style_secondary},"
-            f"{outline_colour},{box_back},{bold},0,0,0,100,100,0,0,"
-            f"3,{style_outline_width},{style_shadow},{alignment},40,40,{margin_v},1\n"
+            f"Style: Box,{fontname},{fontsize},&H00FFFFFF,{style_secondary},"
+            f"{box_fill},&H00000000,{bold},0,0,0,100,100,0,0,"
+            f"3,{box_pad},0,{alignment},{margin_h},{margin_h},{margin_v},1\n"
         )
 
     header = (
@@ -995,7 +1072,7 @@ def srt_to_ass(srt_path, ass_path, *, video_w, video_h, alignment, fontname,
         "Alignment, MarginL, MarginR, MarginV, Encoding\n"
         f"Style: Default,{fontname},{fontsize},{style_primary},{style_secondary},"
         f"{outline_colour},{style_back},{bold},0,0,0,100,100,0,0,"
-        f"{border_style},{style_outline_width},{style_shadow},{alignment},40,40,{margin_v},1\n"
+        f"{border_style},{style_outline_width},{style_shadow},{alignment},{margin_h},{margin_h},{margin_v},1\n"
         f"{box_style_row}"
         "\n[Events]\n"
         "Format: Layer, Start, End, Style, Name, MarginL, MarginR, "
@@ -1178,28 +1255,41 @@ def burn_subtitles(video_path, srt_path, output_path, alignment=2, fontsize=16,
             f"→ '{effective_fontname}' (free Linux equivalent)"
         )
 
-    # OVERFLOW SAFETY NET — shrink the fontsize if the longest wrapped
-    # line would run off the side of the frame. Without this, picking a
-    # template with fontSize 60 + Impact (or any font with wider glyphs
-    # than the one the user saw in preview) produced text that bled off
-    # the left/right edges and disappeared. We compute the longest line
-    # the burn will actually emit, estimate its rendered pixel width
-    # using a font-aware avg-glyph estimate, and scale down if it would
-    # exceed frame_width * 0.94 (6% combined L+R margin).
-    longest_line_chars = _longest_wrapped_line_chars(srt_path)
+    # Horizontal margins — same formula used inside srt_to_ass; we compute
+    # it here too so the overflow guard below uses the ACTUAL drawable area
+    # (video_w minus both margins) rather than the raw frame width.
+    # 5 % per side, floored at 40 px, capped at 100 px.
+    margin_h = max(40, min(int(video_w * 0.05), 100))
+
+    # TWO-LINE FIT — keep the user's chosen size and wrap long captions
+    # across up to two lines, shrinking ONLY when even two lines won't fit.
+    # This mirrors the React preview (computeSafeShrinkRatio with maxLines=2)
+    # so the burned mp4 matches what the user saw, and — crucially — it means
+    # the font-size slider actually changes the burned size. The OLD one-line
+    # guard shrank long captions to "largest that fits one line", which pinned
+    # the size to a constant regardless of the slider (the user's resize bug)
+    # and made captions tiny on narrow 9:16 frames.
+    #
+    # `drawable_w` = video_w − 2×margin_h; a 2 % buffer absorbs glyph-width
+    # estimate variance. `em` is the font-aware avg glyph width.
+    em = _avg_glyph_em_for_font(effective_fontname)
+    drawable_w = video_w - 2 * margin_h
+    safe_w = max(1.0, drawable_w * 0.98)
+    longest_block_chars = _longest_block_chars(srt_path)
     requested_fontsize = final_fontsize
-    final_fontsize = compute_safe_fontsize(
-        requested_fontsize,
-        longest_line_chars=longest_line_chars,
-        frame_width_px=video_w,
-        font_name=effective_fontname,
-    )
-    if final_fontsize < requested_fontsize:
+    two_line_capacity = safe_w * 2.0   # total horizontal room across two lines
+    if longest_block_chars > 0 and (requested_fontsize * em * longest_block_chars) > two_line_capacity:
+        final_fontsize = max(12, int(two_line_capacity / (em * longest_block_chars)))
         print(
-            f"📐 Overflow guard: shrinking fontsize {requested_fontsize}px → "
-            f"{final_fontsize}px so longest line ({longest_line_chars} chars) "
-            f"in '{effective_fontname}' fits within {video_w}px frame."
+            f"📐 Two-line fit: shrinking fontsize {requested_fontsize}px → "
+            f"{final_fontsize}px so the longest caption ({longest_block_chars} chars) "
+            f"fits two lines within {drawable_w}px drawable area "
+            f"({video_w}px frame − {margin_h}px×2 margins)."
         )
+    # Chars that fit on ONE line at the final size — used to wrap each caption
+    # to ≤2 lines at the chosen size (replaces the fixed 38-char wrap, which
+    # left medium captions on one tiny line instead of two big ones).
+    dyn_max_line = max(8, int(safe_w / (max(1, final_fontsize) * em)))
 
     # Convert colors to ASS format
     primary_colour = hex_to_ass_color(font_color, 1.0)
@@ -1264,6 +1354,8 @@ def burn_subtitles(video_path, srt_path, output_path, alignment=2, fontsize=16,
         outline_width=outline_width,
         bold=1,
         margin_v=margin_v,
+        margin_h=margin_h,
+        max_line_chars=dyn_max_line,
         animation=animation,
         highlight_colour=highlight_ass,
         # Per-Dialogue \pos override — None when the legacy edge-anchor

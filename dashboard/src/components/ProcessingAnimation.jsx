@@ -24,9 +24,18 @@ const ProcessingAnimation = ({ media, isComplete, syncedTime, isSyncedPlaying, s
       setVideoSrc(url);
       return () => URL.revokeObjectURL(url);
     } else if (media.type === 'url') {
-      setIsYouTube(true);
+      // Only treat as a YouTube embed when we can actually extract an id.
+      // Otherwise (a non-YouTube URL, a Shorts/live link the regex missed,
+      // or a reopened past-project /videos/ clip path) fall through to a
+      // plain <video> src — forcing isYouTube=true left a permanent spinner.
       const videoId = getYouTubeId(media.payload);
-      setVideoSrc(videoId);
+      if (videoId) {
+        setIsYouTube(true);
+        setVideoSrc(videoId);
+      } else {
+        setIsYouTube(false);
+        setVideoSrc(media.payload);
+      }
     }
   }, [media]);
 
@@ -133,9 +142,11 @@ const ProcessingAnimation = ({ media, isComplete, syncedTime, isSyncedPlaying, s
 
 
   const getYouTubeId = (url) => {
-    const regExp = /^.*(youtu.be\/|v\/|u\/\w\/|embed\/|watch\?v=|&v=)([^#&?]*).*/;
+    if (!url || typeof url !== 'string') return null;
+    // Handle watch?v=, youtu.be/, embed/, shorts/, live/, v/.
+    const regExp = /(?:youtu\.be\/|\/shorts\/|\/live\/|\/embed\/|\/v\/|[?&]v=)([A-Za-z0-9_-]{11})/;
     const match = url.match(regExp);
-    return (match && match[2].length === 11) ? match[2] : null;
+    return match ? match[1] : null;
   };
 
   const containerClasses = `relative w-full aspect-video rounded-xl overflow-hidden bg-black border border-white/10 shadow-2xl mb-8 group animate-[fadeIn_0.5s_ease-out] transition-all duration-500 

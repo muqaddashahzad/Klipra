@@ -9,6 +9,17 @@ FONT_URL = "https://github.com/googlefonts/noto-fonts/raw/main/hinted/ttf/NotoSe
 FONT_DIR = "fonts"
 FONT_PATH = os.path.join(FONT_DIR, "NotoSerif-Bold.ttf")
 
+# App-local emoji fonts (bundled into ./fonts, or auto-downloaded on first
+# use). These are the DURABLE source of emoji glyphs: the base Docker image's
+# fonts-noto-color-emoji package kept getting lost whenever the image was
+# rebuilt or restored from a backup, which is why "emoji burn as tofu" kept
+# coming back. By keeping our own copy alongside the app (exactly like the
+# serif hook font) the burn no longer depends on the OS having an emoji font.
+EMOJI_COLOR_LOCAL = os.path.join(FONT_DIR, "NotoColorEmoji.ttf")
+EMOJI_MONO_LOCAL = os.path.join(FONT_DIR, "Symbola.ttf")
+# Download source if neither the local copy nor a system font exists.
+EMOJI_FONT_URL = "https://github.com/googlefonts/noto-emoji/raw/main/fonts/NotoColorEmoji.ttf"
+
 
 # ----------------------------------------------------------------------
 # Emoji rendering — fallback chain for the hook overlay
@@ -30,6 +41,12 @@ FONT_PATH = os.path.join(FONT_DIR, "NotoSerif-Bold.ttf")
 # then scale to the target text height.
 
 EMOJI_FONT_CANDIDATES = [
+    # App-local copies FIRST — these always exist (bundled or auto-downloaded)
+    # and don't depend on the Docker base image, so emoji never silently
+    # disappear after an image rebuild/restore. Color preferred, mono fallback.
+    EMOJI_COLOR_LOCAL,
+    EMOJI_MONO_LOCAL,
+    # System fonts (present when the Docker image's font packages are intact).
     "/usr/share/fonts/truetype/noto/NotoColorEmoji.ttf",
     "/usr/share/fonts/truetype/symbola/Symbola.ttf",
     "/usr/share/fonts/truetype/symbola/Symbola_hint.ttf",
@@ -271,6 +288,37 @@ def download_font_if_needed():
         except Exception as e:
             print(f"❌ Failed to download font: {e}")
 
+
+def download_emoji_font_if_needed():
+    """Ensure at least one emoji font exists, downloading Noto Color Emoji
+    into ./fonts if none is found.
+
+    This is the DURABILITY fix for the recurring "emoji in the viral hook
+    burn as a tofu block" bug. The real cause was that the base Docker image's
+    `fonts-noto-color-emoji` package kept disappearing (image rebuilt from an
+    older layer / restored from a backup), so at burn time Pillow had no emoji
+    font and the renderer painted the emoji codepoint with the serif font —
+    a .notdef box. We now keep our own emoji font next to the app (same as the
+    serif hook font), so it survives any image change. No-op once on disk.
+    """
+    # Already have an emoji font somewhere? Nothing to do.
+    for p in EMOJI_FONT_CANDIDATES:
+        if os.path.isfile(p):
+            return
+    try:
+        if not os.path.exists(FONT_DIR):
+            os.makedirs(FONT_DIR)
+        print("⬇️ No emoji font found — downloading Noto Color Emoji into "
+              f"./{FONT_DIR} (one-time, ~11 MB)…")
+        req = urllib.request.Request(EMOJI_FONT_URL, headers={'User-Agent': 'Mozilla/5.0'})
+        with urllib.request.urlopen(req) as response, open(EMOJI_COLOR_LOCAL, 'wb') as out_file:
+            out_file.write(response.read())
+        print(f"✅ Emoji font ready: {EMOJI_COLOR_LOCAL}")
+    except Exception as e:
+        print(f"⚠️ Could not download emoji font ({e}). Emoji will be dropped "
+              "from the hook (no tofu) until a font is available.")
+
+
 def _hex_to_rgb(hex_str, fallback=(255, 255, 255)):
     """Tiny helper — accepts '#RRGGBB' / 'RRGGBB' / shorter forms."""
     try:
@@ -301,7 +349,8 @@ def create_hook_image(
     bg_opacity:    0.0–1.0 — alpha multiplier for the box (0.94 ≈ 240/255)
     """
     download_font_if_needed()
-    
+    download_emoji_font_if_needed()
+
     # Configuration
     padding_x = 30 # Balanced padding
     padding_y = 25 
@@ -488,19 +537,27 @@ def create_hook_image(
         for is_emoji_run, run in _split_runs(line):
             if not run:
                 continue
-            if is_emoji_run and emoji_fonts:
-                w = _render_emoji_inline(
-                    img, x, current_y, run, emoji_fonts,
-                    target_size_px=font_size,
-                )
-                # Defensive fallback if render returned 0 (unlikely
-                # now that we resize on a side canvas, but cheap).
-                if not w:
-                    w = _measure_emoji_target(run)
-                # Refresh the draw handle in case the underlying image
-                # was modified by the inline renderer's paste step.
-                draw_final = ImageDraw.Draw(img)
-                x += w
+            if is_emoji_run:
+                # EMOJI RUN — render with the emoji font pipeline. CRITICAL:
+                # never fall through to the serif `draw.text` below for an
+                # emoji, because Noto Serif has no emoji glyphs and would
+                # paint a .notdef tofu box — THAT was the "emoji → block"
+                # bug. If no emoji font is available, or the glyph is missing
+                # in every font, we DROP the emoji (advance by its reserved
+                # width so wrapping stays aligned) instead of drawing tofu.
+                w = 0
+                if emoji_fonts:
+                    w = _render_emoji_inline(
+                        img, x, current_y, run, emoji_fonts,
+                        target_size_px=font_size,
+                    )
+                    # Refresh the draw handle — the inline renderer pasted
+                    # onto the underlying image.
+                    draw_final = ImageDraw.Draw(img)
+                # Advance the cursor by the rendered width, or by the
+                # reserved emoji width if it was dropped, so the rest of the
+                # line stays where wrapping expected it.
+                x += w if w else _measure_emoji_target(run)
             else:
                 draw_final.text((x, current_y), run, font=font, fill=text_rgb)
                 x += _measure_run(draw_final, run, font)
@@ -520,17 +577,34 @@ def add_hook_to_video(
     bg_color="#FFFFFF",
     bg_opacity=0.94,
     y_offset_pct=None,
+    h_align="center",
+    v_align=None,
+    margin_x=40,
+    margin_y=40,
 ):
     """
     Overlays text hook onto video.
-    position:     'top', 'center', 'bottom' (used when y_offset_pct is None)
+
+    NEW flexible 2-D placement (preferred):
+      h_align:  'left' | 'center' | 'right' — horizontal anchor. When left/
+                right, the box hugs that edge offset by `margin_x` px.
+      v_align:  'top' | 'center' | 'bottom' — vertical anchor. When top/
+                bottom, the box hugs that edge offset by `margin_y` px.
+      margin_x: px gap from the left/right edge (used when h_align != center).
+      margin_y: px gap from the top/bottom edge (used when v_align top/bottom).
+      → e.g. h_align='right', v_align='top', margin_x=50, margin_y=50 places
+        the hook in the top-right corner, 50 px in from the top and right.
+
+    LEGACY vertical placement (still honoured when v_align is None, so older
+    saved hooks render unchanged):
+      position:     'top', 'center', 'bottom' (used when y_offset_pct is None)
+      y_offset_pct: 0–100, % from top of frame to box CENTER; overrides
+                    `position` when provided.
+
     font_scale:   float multiplier (1.0 = default)
     text_color:   hex string for the rendered text color
     bg_color:     hex string for the rounded box behind the text
     bg_opacity:   0.0–1.0 alpha for the box
-    y_offset_pct: 0–100, % from top of frame to box CENTER; overrides
-                  `position` when provided. Lets the modal slider drop
-                  the hook anywhere vertically.
     """
     if not os.path.exists(video_path):
         raise FileNotFoundError(f"Video {video_path} not found")
@@ -549,11 +623,21 @@ def add_hook_to_video(
         video_height = 1920
         
     # 2. Generate Image
-    # Box check: Don't let it be wider than 90% of screen
-    target_box_width = int(video_width * 0.9)
+    # Box width cap. A centred hook may span up to 90% of the frame (banner
+    # style). But a hook anchored to the LEFT or RIGHT edge must be COMPACT,
+    # otherwise a 90%-wide box right-anchored still spans the whole frame and
+    # "top-right" looks identical to "top-centre" (the bug the user hit). Cap
+    # edge-anchored hooks to ~50% so they form a real corner element.
+    _edge_anchored = (h_align or "center").lower() in ("left", "right")
+    target_box_width = int(video_width * (0.50 if _edge_anchored else 0.9))
     
-    hook_filename = f"temp_hook_{os.path.basename(video_path)}.png"
-    # Ensure unique or temp location if needed, but relative is fine for this app structure
+    # Unique name in the OUTPUT video's own folder (not CWD). The old
+    # basename-only name in CWD collided across concurrent burns of
+    # same-basename clips (every batch has clip_00.mp4 …) — one burn would
+    # delete another's overlay mid-render.
+    import uuid as _uuid, tempfile as _tempfile
+    _hook_dir = os.path.dirname(os.path.abspath(output_path)) or _tempfile.gettempdir()
+    hook_filename = os.path.join(_hook_dir, f"temp_hook_{_uuid.uuid4().hex}.png")
     
     try:
         img_path, box_w, box_h = create_hook_image(
@@ -565,16 +649,39 @@ def add_hook_to_video(
         )
         
         # 3. Calculate Overlay Position
-        overlay_x = (video_width - box_w) // 2
+        # --- Horizontal: left / center / right, hugging the edge by margin_x.
+        _ha = (h_align or "center").lower()
+        try:
+            _mx = max(0, int(margin_x if margin_x is not None else 40))
+        except (TypeError, ValueError):
+            _mx = 40
+        if _ha == "left":
+            overlay_x = _mx
+        elif _ha == "right":
+            overlay_x = video_width - box_w - _mx
+        else:
+            overlay_x = (video_width - box_w) // 2
+        overlay_x = max(0, min(overlay_x, max(0, video_width - box_w)))
 
-        if y_offset_pct is not None:
-            # Custom slider — % from top of frame to box CENTER, clamped
-            # so the box stays fully on-screen.
+        # --- Vertical: prefer the explicit v_align anchor (new model), then
+        # fall back to the legacy y_offset_pct slider, then position presets.
+        try:
+            _my = max(0, int(margin_y if margin_y is not None else 40))
+        except (TypeError, ValueError):
+            _my = 40
+        _va = (v_align or "").lower()
+        if _va in ("top", "center", "bottom"):
+            if _va == "top":
+                overlay_y = _my
+            elif _va == "bottom":
+                overlay_y = video_height - box_h - _my
+            else:
+                overlay_y = (video_height - box_h) // 2
+        elif y_offset_pct is not None:
+            # Custom slider — % from top of frame to box CENTER.
             pct = max(0.0, min(100.0, float(y_offset_pct))) / 100.0
             target_center_y = int(video_height * pct)
             overlay_y = target_center_y - box_h // 2
-            # Clamp so the box doesn't poke off the top or bottom edge.
-            overlay_y = max(10, min(overlay_y, video_height - box_h - 10))
         elif position == "center":
             overlay_y = (video_height - box_h) // 2
         elif position == "bottom":
@@ -583,6 +690,8 @@ def add_hook_to_video(
         else:
             # 'top' — center of box at ~20% from top.
             overlay_y = max(0, int(video_height * 0.20) - box_h // 2)
+        # Clamp so the box always stays fully on-screen.
+        overlay_y = max(0, min(overlay_y, max(0, video_height - box_h)))
         
         # 4. FFmpeg Command
         print(f"🎬 Overlaying hook: '{text}' at {overlay_x},{overlay_y}")

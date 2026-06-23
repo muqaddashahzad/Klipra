@@ -92,7 +92,6 @@ def transcribe_with_elevenlabs(
         # text fields. Setting `timestamps_granularity=word` is what
         # gives us the per-word timings we need for word-aligned
         # subtitle burn-in later.
-        files = {"file": ("audio.mp3", open(audio_path, "rb"), "audio/mpeg")}
         data = {
             "model_id": SCRIBE_MODEL_ID,
             "timestamps_granularity": "word",
@@ -104,7 +103,11 @@ def transcribe_with_elevenlabs(
         headers = {"xi-api-key": api_key}
 
         print(f"🎙️  ElevenLabs Scribe: uploading {os.path.getsize(audio_path)/1024:.1f} KB audio…")
-        with httpx.Client(timeout=timeout_sec) as client:
+        # `with open(...)` so the handle closes before the finally block
+        # os.removes it (body is fully read by the time post() returns) —
+        # fixes an fd leak / Windows unlink failure.
+        with httpx.Client(timeout=timeout_sec) as client, open(audio_path, "rb") as _audio_fh:
+            files = {"file": ("audio.mp3", _audio_fh, "audio/mpeg")}
             resp = client.post(SCRIBE_ENDPOINT, headers=headers, files=files, data=data)
 
         if resp.status_code == 401:

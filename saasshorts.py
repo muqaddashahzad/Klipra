@@ -1058,6 +1058,27 @@ def transcribe_audio_for_subs(audio_path: str) -> list:
     Transcribe audio with word-level timestamps using faster-whisper.
     Returns list of {"word": str, "start": float, "end": float}.
     """
+    # Native-Mac GPU sidecar first — large-v3-turbo on Metal beats the
+    # CPU "base" model below on both accuracy and speed. Flatten its
+    # segments into the word list this helper promises.
+    try:
+        from main import _try_whisper_sidecar
+        side = _try_whisper_sidecar(audio_path)
+        if side and side.get("segments"):
+            words = []
+            for seg in side["segments"]:
+                for w in seg.get("words") or []:
+                    words.append({
+                        "word": (w.get("word") or "").strip(),
+                        "start": float(w.get("start", 0.0)),
+                        "end": float(w.get("end", 0.0)),
+                    })
+            if words:
+                print(f"[SaaSShorts] ✅ Transcribed {len(words)} words (GPU sidecar)")
+                return words
+    except Exception as _side_err:
+        print(f"[SaaSShorts] ℹ️ Sidecar unavailable ({_side_err}) — using CPU whisper.")
+
     from faster_whisper import WhisperModel
 
     print(f"[SaaSShorts] 🎙️ Transcribing audio for subtitles...")
@@ -1213,10 +1234,17 @@ def composite_video(
     prev_end = 0.0
 
     for i, clip in enumerate(sorted_broll):
-        bstart = clip["start"]
+        # Clamp the start past the previous segment so OVERLAPPING picks
+        # don't produce a negative/zero-length window.
+        bstart = max(clip["start"], prev_end)
         actual_dur = broll_durations[i]
         # B-roll segment can't be longer than the actual clip
         bend = min(clip["end"], bstart + actual_dur)
+
+        # Skip degenerate segments — ffmpeg trim=0:<=0 errors or yields a
+        # corrupt concat (overlapping picks or a ~0s actual_dur cause this).
+        if bend - bstart < 0.1:
+            continue
 
         if prev_end < bstart:
             segments.append({"type": "th", "start": prev_end, "end": bstart})

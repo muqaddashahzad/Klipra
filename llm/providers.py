@@ -376,3 +376,291 @@ class OllamaProvider(LLMProvider):
                 ) from e
         # Defensive — loop should always either return or raise.
         raise LLMError(f"Ollama JSON request exhausted retries: {last_err}")
+
+
+# ---------------------------------------------------------------------------
+# Google Gemini SUBSCRIPTION (via web cookies, no API quota)
+# ---------------------------------------------------------------------------
+
+class GeminiSubscriptionProvider(LLMProvider):
+    """Uses the user's Google AI Pro consumer subscription via the
+    `gemini-webapi` library (which talks to gemini.google.com directly
+    with the user's session cookies, NOT the developer API).
+
+    Difference from `GeminiProvider`:
+        GeminiProvider          → developer API at generativelanguage.googleapis.com
+                                  Pay-per-token, hits free-tier rate limits.
+        GeminiSubscriptionProvider → consumer chat at gemini.google.com
+                                  Uses your $20/mo AI Pro subscription's
+                                  5-hour-window quota. No API quota.
+
+    Cookies live in /app/data/gemini_cookies.json (host-mounted volume).
+    The user populates that file by running Setup-Gemini-Subscription.command.
+
+    Caveats users should know:
+      - Personal use only. Google's ToS doesn't formally permit
+        programmatic access via consumer cookies.
+      - Web UI changes can break this provider. The gemini-webapi
+        maintainers usually catch up in days.
+      - If the user signs out of gemini.google.com in Chrome, the
+        cookies become invalid and the script must be re-run.
+    """
+
+    name = "gemini-subscription"
+    COOKIE_PATH = "/app/data/gemini_cookies.json"
+
+    # Map our model identifiers to gemini-webapi's Model enum.
+    # Defaults to G_2_0_FLASH if the requested model isn't known.
+    _MODEL_MAP_LAZY = None
+
+    @classmethod
+    def _model_map(cls):
+        """Map our public model identifiers to gemini-webapi's Model enum.
+
+        gemini-webapi 2.x uses tier-based naming (matches the actual UI):
+          BASIC_*    → free tier (gemini.google.com without subscription)
+          PLUS_*     → Google AI Pro subscription ($20/mo) — what most users have
+          ADVANCED_* → Google AI Ultra subscription ($200/mo)
+
+        Our public ids prefix with the tier so user gets to pick.
+        """
+        if cls._MODEL_MAP_LAZY is not None:
+            return cls._MODEL_MAP_LAZY
+        try:
+            from gemini_webapi.constants import Model
+        except ImportError as e:
+            raise LLMError(
+                "gemini-webapi package not installed. Rebuild backend "
+                "after adding gemini-webapi>=1.5.0 to requirements.txt."
+            ) from e
+        out = {}
+        # Try both the new tier-based names (2.x) AND legacy names just in case
+        # the library version varies between environments.
+        candidates = [
+            # ── AI Pro tier (PLUS_*) — most users ──
+            ("gemini-3-flash-plus",       "PLUS_FLASH"),
+            ("gemini-3-pro-plus",         "PLUS_PRO"),
+            ("gemini-3-flash-thinking-plus", "PLUS_THINKING"),
+            # ── AI Ultra tier (ADVANCED_*) ──
+            ("gemini-3-flash-advanced",   "ADVANCED_FLASH"),
+            ("gemini-3-pro-advanced",     "ADVANCED_PRO"),
+            ("gemini-3-flash-thinking-advanced", "ADVANCED_THINKING"),
+            # ── Free tier (BASIC_*) — works without subscription ──
+            ("gemini-3-flash",            "BASIC_FLASH"),
+            ("gemini-3-pro",              "BASIC_PRO"),
+            ("gemini-3-flash-thinking",   "BASIC_THINKING"),
+            # ── Legacy 1.x library names — kept for fallback compatibility ──
+            ("gemini-2.5-flash",          "G_2_5_FLASH"),
+            ("gemini-2.5-pro",            "G_2_5_PRO"),
+            ("gemini-2.0-flash",          "G_2_0_FLASH"),
+            ("gemini-2.0-flash-thinking", "G_2_0_FLASH_THINKING"),
+            ("gemini-1.5-pro",            "G_1_5_PRO"),
+            ("gemini-1.5-flash",          "G_1_5_FLASH"),
+        ]
+        for our_id, attr in candidates:
+            v = getattr(Model, attr, None)
+            if v is not None:
+                out[our_id] = v
+        cls._MODEL_MAP_LAZY = out
+        return out
+
+    _warned_model_fallback = False
+
+    def _resolved_model(self):
+        """Pick the right Model enum for the requested id, with sensible
+        fallback to the user's likely subscription tier."""
+        m = (self.model or "").strip().lower()
+        mapping = self._model_map()
+        if m in mapping:
+            return mapping[m]
+        # Sensible defaults — prefer PLUS (AI Pro) since that's what most
+        # users on this provider will have. Fall back to BASIC (free) if
+        # the AI Pro tier constants aren't exposed.
+        for candidate in (
+            "gemini-3-flash-plus",        # AI Pro fast
+            "gemini-3-flash",             # Free fast
+            "gemini-2.5-flash",           # Legacy fast
+            "gemini-3-pro-plus",          # AI Pro quality
+            "gemini-3-pro",               # Free quality
+        ):
+            if candidate in mapping:
+                chosen = mapping[candidate]
+                # Surface the silent downgrade ONCE so a model-name/library
+                # mismatch (e.g. the requested tier isn't exposed by the
+                # pinned gemini-webapi) is visible instead of mysteriously
+                # giving lower-quality output.
+                if not type(self)._warned_model_fallback:
+                    type(self)._warned_model_fallback = True
+                    print(f"⚠️  gemini-subscription: requested model {self.model!r} not "
+                          f"available in this gemini-webapi — using {getattr(chosen, 'name', chosen)} instead.",
+                          flush=True)
+                return chosen
+        if mapping:
+            return next(iter(mapping.values()))
+        raise LLMError("No usable Gemini model constants exposed by gemini-webapi")
+
+    def _load_cookies(self) -> dict:
+        from pathlib import Path
+        p = Path(self.COOKIE_PATH)
+        if not p.exists():
+            raise LLMError(
+                f"Gemini subscription cookies not found at {self.COOKIE_PATH}. "
+                "Run Setup-Gemini-Subscription.command at the Klipra root to "
+                "extract them from your Chrome browser, then restart this "
+                "backend container."
+            )
+        try:
+            data = json.loads(p.read_text())
+        except Exception as e:
+            raise LLMError(f"Could not parse {self.COOKIE_PATH}: {e}") from e
+        needed = {"__Secure-1PSID", "__Secure-1PSIDTS"}
+        missing = needed - set(data.keys())
+        if missing:
+            raise LLMError(
+                f"Missing required Gemini cookies: {sorted(missing)}. "
+                "Re-run Setup-Gemini-Subscription.command — make sure you're "
+                "logged into gemini.google.com in Chrome first."
+            )
+        return data
+
+    # ── Persistent session (class-level) ────────────────────────────────
+    # ONE event loop on a daemon thread + ONE cached GeminiClient, reused
+    # across every call. The previous design created a fresh GeminiClient and
+    # called client.init() on EVERY complete_text — for a 356-segment
+    # transliteration that's 356 × (7s init + a fresh cookie auth roundtrip),
+    # which hammered gemini.google.com, tripped the "UNAUTHENTICATED" de-auth,
+    # and ultimately crashed the clip-gen subprocess (exit code 1). Reusing
+    # one authenticated client makes calls fast and stops the auth storm.
+    _loop = None
+    _loop_thread = None
+    _client = None
+    _client_cookie_fp = None
+    _session_lock = None  # threading.Lock, lazily created
+
+    @classmethod
+    def _ensure_loop(cls):
+        import asyncio
+        import threading
+        if cls._session_lock is None:
+            cls._session_lock = threading.Lock()
+        with cls._session_lock:
+            if (cls._loop is not None and cls._loop_thread is not None
+                    and cls._loop_thread.is_alive()):
+                return
+            cls._loop = asyncio.new_event_loop()
+
+            def _run():
+                asyncio.set_event_loop(cls._loop)
+                cls._loop.run_forever()
+
+            cls._loop_thread = threading.Thread(
+                target=_run, daemon=True, name="gemini-sub-loop")
+            cls._loop_thread.start()
+
+    @classmethod
+    def _submit(cls, coro, timeout=120):
+        """Marshal a coroutine onto the persistent loop and wait for it."""
+        import asyncio
+        cls._ensure_loop()
+        fut = asyncio.run_coroutine_threadsafe(coro, cls._loop)
+        try:
+            return fut.result(timeout=timeout)
+        except Exception:
+            try:
+                fut.cancel()
+            except Exception:
+                pass
+            raise
+
+    @classmethod
+    def _reset_client(cls):
+        """Drop the cached client so the next call re-inits (used after any
+        failure — covers expired cookies / a session that went bad)."""
+        cls._client = None
+        cls._client_cookie_fp = None
+
+    async def _get_client(self, cookies):
+        cls = type(self)
+        fp = (cookies.get("__Secure-1PSID", "")[-12:] + "|"
+              + (cookies.get("__Secure-1PSIDTS", "") or "")[-12:])
+        if cls._client is not None and cls._client_cookie_fp == fp:
+            return cls._client
+        from gemini_webapi import GeminiClient
+        client = GeminiClient(
+            secure_1psid=cookies["__Secure-1PSID"],
+            secure_1psidts=cookies.get("__Secure-1PSIDTS"),
+            proxy=None,
+        )
+        await client.init(timeout=30)
+        cls._client = client
+        cls._client_cookie_fp = fp
+        return client
+
+    # ── Circuit breaker ─────────────────────────────────────────────────
+    # When the cookies aren't authenticating, gemini-webapi retries the
+    # session init ~6× with backoff → ~100s PER call, then returns content
+    # via an unauthenticated/free path. Over a 356-segment clip-gen run that
+    # is an hour of grinding. Instead: a healthy call answers in <40s, so we
+    # cap each attempt at 40s; the FIRST timeout/failure trips this breaker,
+    # and every subsequent call for the next 10 min raises immediately →
+    # FallbackProvider goes straight to local Ollama (fast + reliable).
+    _CALL_TIMEOUT_S = 40
+    _BREAKER_COOLDOWN_S = 600
+    _unhealthy_until = 0.0
+
+    def complete_text(self, system: str, user: str, *, max_tokens: int = 4096) -> str:
+        import time as _t
+        cls = type(self)
+
+        # Circuit open? Fail fast so FallbackProvider hits Ollama instantly.
+        if _t.monotonic() < cls._unhealthy_until:
+            raise LLMError(
+                "Gemini subscription session is unauthenticated (cookies likely "
+                "expired/rotated) — backing off; using fallback. Re-run "
+                "Setup-Gemini-Subscription.command to restore it."
+            )
+
+        try:
+            from gemini_webapi import GeminiClient  # noqa: F401 — presence check
+        except ImportError as e:
+            raise LLMError(
+                "gemini-webapi package not installed. Rebuild backend "
+                "after adding gemini-webapi>=1.5.0 to requirements.txt."
+            ) from e
+
+        cookies = self._load_cookies()
+        model_const = self._resolved_model()
+
+        # gemini.google.com expects a single combined prompt; there's no
+        # separate system slot like the developer API. Front-load the
+        # system instruction.
+        combined = f"{system.strip()}\n\n---\n\n{user.strip()}".strip()
+
+        async def _call():
+            client = await self._get_client(cookies)
+            resp = await client.generate_content(combined, model=model_const)
+            return getattr(resp, "text", "") or ""
+
+        def _trip_breaker():
+            cls._unhealthy_until = _t.monotonic() + cls._BREAKER_COOLDOWN_S
+            cls._reset_client()
+
+        try:
+            text = self._submit(_call(), timeout=cls._CALL_TIMEOUT_S)
+        except Exception as e:
+            # Timeout or hard failure: trip the breaker so the rest of the
+            # run uses Ollama instead of paying the timeout every call.
+            _trip_breaker()
+            raise LLMError(
+                "Gemini subscription call failed/timed out (cookies may be "
+                "expired or rotated — re-run Setup-Gemini-Subscription.command "
+                f"after logging into gemini.google.com in Chrome): {e}"
+            )
+        if not text.strip():
+            _trip_breaker()
+            raise LLMError(
+                "Gemini subscription returned an empty response — cookies "
+                "likely expired. Re-run Setup-Gemini-Subscription.command, "
+                "or switch the AI provider to Ollama."
+            )
+        return text

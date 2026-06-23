@@ -272,7 +272,11 @@ def _escape_ffmpeg_text(s: str) -> str:
     return (
         s.replace("\\", "\\\\")
          .replace(":", r"\:")
-         .replace("'", r"\\'")
+         # The value is wrapped in SINGLE quotes in the filter string, so a
+         # literal apostrophe must be the 4-char sequence  '\''  (close, escaped
+         # quote, reopen). The old r"\\'" rendered "it's" as "it\s" and could
+         # break the whole filter chain.
+         .replace("'", "'\\''")
          .replace("%", r"\%")
          .replace(",", r"\,")
     )

@@ -1,5 +1,11 @@
 import { defineConfig } from 'vite'
 import react from '@vitejs/plugin-react'
+import fs from 'fs'
+
+const isDocker = fs.existsSync('/.dockerenv')
+const backendTarget = isDocker ? 'http://backend:8000' : 'http://localhost:8000'
+const rendererTarget = isDocker ? 'http://renderer:3100' : 'http://localhost:3100'
+const clearcastTarget = isDocker ? 'http://clearcast:8770' : 'http://localhost:8770'
 
 // https://vitejs.dev/config/
 export default defineConfig({
@@ -17,36 +23,37 @@ export default defineConfig({
     ],
     proxy: {
       '/api': {
-        target: 'http://backend:8000',
+        target: backendTarget,
         changeOrigin: true,
       },
       '/videos': {
-        target: 'http://backend:8000',
+        target: backendTarget,
         changeOrigin: true,
       },
       '/thumbnails': {
-        target: 'http://backend:8000',
+        target: backendTarget,
         changeOrigin: true,
       },
       '/gallery': {
-        target: 'http://backend:8000',
+        target: backendTarget,
         changeOrigin: true,
       },
       '/video': {
-        target: 'http://backend:8000',
+        target: backendTarget,
         changeOrigin: true,
       },
       '/render': {
-        target: 'http://renderer:3100',
+        target: rendererTarget,
         changeOrigin: true,
       },
       // Audio Cleaning engine (Clearcast) — a Docker service in this stack.
       // Reached by compose service name. Strip the /clearcast prefix.
       '/clearcast': {
-        target: 'http://clearcast:8770',
+        target: clearcastTarget,
         changeOrigin: true,
         rewrite: (p) => p.replace(/^\/clearcast/, ''),
       },
     }
   }
 })
+

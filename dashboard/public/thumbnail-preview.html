@@ -1,0 +1,209 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8"/>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { width: 1280px; height: 720px; overflow: hidden; background: #000; font-family: 'Arial Black', 'Arial', sans-serif; }
+
+  .bg {
+    position: absolute; inset: 0;
+    background: linear-gradient(135deg, #0a0a0a 0%, #0d1117 50%, #0a0f1a 100%);
+  }
+  .bg::before {
+    content: '';
+    position: absolute; inset: 0;
+    background-image:
+      linear-gradient(rgba(255,255,255,.02) 1px, transparent 1px),
+      linear-gradient(90deg, rgba(255,255,255,.02) 1px, transparent 1px);
+    background-size: 55px 55px;
+  }
+  .glow-red {
+    position: absolute; top: -120px; left: -80px;
+    width: 520px; height: 520px; border-radius: 50%;
+    background: radial-gradient(circle, rgba(220,38,38,.28) 0%, transparent 65%);
+  }
+  .glow-green {
+    position: absolute; bottom: -100px; right: 280px;
+    width: 480px; height: 480px; border-radius: 50%;
+    background: radial-gradient(circle, rgba(34,197,94,.2) 0%, transparent 65%);
+  }
+
+  /* ---- LAYOUT ---- */
+  .wrap {
+    position: relative; width: 1280px; height: 720px;
+    display: grid;
+    grid-template-columns: 1fr 420px;
+    grid-template-rows: 1fr 52px;
+  }
+
+  /* LEFT */
+  .left {
+    display: flex; flex-direction: column;
+    justify-content: center;
+    padding: 40px 44px 20px 56px; gap: 16px;
+  }
+
+  .badge {
+    display: inline-flex; align-items: center; gap: 10px;
+    background: rgba(220,38,38,.18); border: 1.5px solid rgba(220,38,38,.55);
+    border-radius: 999px; padding: 6px 18px; width: fit-content;
+  }
+  .badge-dot { width: 9px; height: 9px; background: #ef4444; border-radius: 50%; box-shadow: 0 0 10px #ef4444; }
+  .badge-text { color: #ef4444; font-size: 20px; font-weight: 900; letter-spacing: 1.5px; text-transform: uppercase; }
+
+  .headline { display: flex; flex-direction: column; gap: 0px; }
+  .h1 { font-size: 78px; font-weight: 900; color: #fff; line-height: .96; letter-spacing: -2px; text-shadow: 0 4px 20px rgba(0,0,0,.9); }
+  .h1 .arrow { color: #ef4444; }
+  .h2 { font-size: 78px; font-weight: 900; color: #fff; line-height: .96; letter-spacing: -2px; text-shadow: 0 4px 20px rgba(0,0,0,.9); }
+  .h2 .green { color: #22c55e; text-shadow: 0 0 30px rgba(34,197,94,.6); }
+  .h3 { font-size: 32px; font-weight: 900; color: #c4c4c4; letter-spacing: -0.5px; margin-top: 8px; }
+
+  .pills { display: flex; align-items: center; gap: 14px; margin-top: 4px; }
+  .pill-free {
+    background: linear-gradient(90deg, #16a34a, #22c55e);
+    color: #fff; font-size: 30px; font-weight: 900;
+    padding: 9px 26px; border-radius: 12px; letter-spacing: 1px;
+    box-shadow: 0 0 28px rgba(34,197,94,.55);
+  }
+  .pill-nosub { color: #888; font-size: 24px; font-weight: 800; text-decoration: line-through; }
+
+  .features { display: flex; flex-direction: column; gap: 7px; margin-top: 6px; }
+  .feat { display: flex; align-items: center; gap: 10px; color: #d4d4d4; font-size: 20px; font-weight: 700; }
+  .feat-icon { font-size: 18px; }
+
+  /* RIGHT — face + waveforms stacked */
+  .right {
+    display: flex; flex-direction: column;
+    justify-content: center; align-items: center;
+    padding: 24px 28px 20px 10px; gap: 12px;
+  }
+
+  /* face placeholder */
+  .face-box {
+    width: 340px; height: 220px;
+    border-radius: 18px; overflow: hidden;
+    border: 2.5px dashed rgba(255,255,255,.2);
+    background: rgba(255,255,255,.04);
+    display: flex; flex-direction: column;
+    align-items: center; justify-content: center;
+    gap: 8px; color: rgba(255,255,255,.25); font-size: 14px; font-weight: 700;
+    letter-spacing: .5px; text-align: center;
+  }
+  .face-icon { font-size: 48px; opacity: .35; }
+
+  .wave-card {
+    width: 340px; border-radius: 14px;
+    border: 1.5px solid rgba(255,255,255,.07);
+    background: rgba(255,255,255,.03);
+    padding: 11px 13px;
+  }
+  .wave-lbl { font-size: 14px; font-weight: 900; letter-spacing: 1px; text-transform: uppercase; margin-bottom: 7px; }
+  .wave-lbl.bad  { color: #ef4444; }
+  .wave-lbl.good { color: #22c55e; }
+  .waveform { display: flex; align-items: center; gap: 2px; height: 52px; }
+  .bar { border-radius: 3px; flex-shrink: 0; }
+
+  .vs-row {
+    display: flex; align-items: center; gap: 8px;
+    color: #fff; font-size: 17px; font-weight: 900;
+  }
+  .vs-circle {
+    width: 36px; height: 36px; border-radius: 50%; flex-shrink: 0;
+    background: linear-gradient(135deg, #22c55e, #16a34a);
+    display: flex; align-items: center; justify-content: center;
+    font-size: 18px; box-shadow: 0 0 14px rgba(34,197,94,.5);
+  }
+
+  /* BOTTOM STRIP */
+  .strip {
+    grid-column: 1 / -1;
+    background: linear-gradient(90deg, rgba(220,38,38,.1), rgba(34,197,94,.1));
+    border-top: 1px solid rgba(255,255,255,.07);
+    display: flex; align-items: center; justify-content: center; gap: 44px;
+  }
+  .s-item { color: rgba(255,255,255,.65); font-size: 17px; font-weight: 800; display: flex; align-items: center; gap: 8px; }
+  .s-dot { width: 6px; height: 6px; border-radius: 50%; background: #22c55e; box-shadow: 0 0 6px #22c55e; }
+</style>
+</head>
+<body>
+<div class="bg"></div>
+<div class="glow-red"></div>
+<div class="glow-green"></div>
+
+<div class="wrap">
+
+  <!-- LEFT -->
+  <div class="left">
+    <div class="badge"><div class="badge-dot"></div><span class="badge-text">Free &amp; Open Source</span></div>
+
+    <div class="headline">
+      <div class="h1">Noisy Voice <span class="arrow">→</span></div>
+      <div class="h2">Studio <span class="green">Podcast</span></div>
+      <div class="h3">with Free AI. No Subscription. Ever.</div>
+    </div>
+
+    <div class="pills">
+      <div class="pill-free">100% FREE</div>
+      <div class="pill-nosub">No Subscription</div>
+    </div>
+
+    <div class="features">
+      <div class="feat"><span class="feat-icon">🔇</span> Remove Noise &amp; Background Sound</div>
+      <div class="feat"><span class="feat-icon">🏛️</span> Remove Room Echo &amp; Reverb</div>
+      <div class="feat"><span class="feat-icon">🎙️</span> Podcast-level Loudness</div>
+    </div>
+  </div>
+
+  <!-- RIGHT -->
+  <div class="right">
+    <!-- face placeholder -->
+    <div class="face-box">
+      <div class="face-icon">🙂</div>
+      <div>ADD YOUR PHOTO HERE<br/><span style="font-weight:400;opacity:.7">Recommended for higher CTR</span></div>
+    </div>
+
+    <div class="wave-card">
+      <div class="wave-lbl bad">❌ Before — Noisy</div>
+      <div class="waveform" id="noisy"></div>
+    </div>
+
+    <div class="vs-row">
+      <div class="vs-circle">↓</div>
+      <span>Klipra AI fixes it instantly</span>
+    </div>
+
+    <div class="wave-card">
+      <div class="wave-lbl good">✅ After — Studio</div>
+      <div class="waveform" id="clean"></div>
+    </div>
+  </div>
+
+  <!-- BOTTOM STRIP -->
+  <div class="strip">
+    <div class="s-item"><span class="s-dot"></span>Remove Noise</div>
+    <div class="s-item"><span class="s-dot"></span>Remove Echo &amp; Reverb</div>
+    <div class="s-item"><span class="s-dot"></span>Podcast Loudness</div>
+    <div class="s-item"><span class="s-dot"></span>Video In → Video Out</div>
+    <div class="s-item"><span class="s-dot"></span>Runs on Your Mac</div>
+  </div>
+
+</div>
+
+<script>
+const noisy = document.getElementById('noisy');
+[8,30,14,50,6,40,54,12,46,8,58,18,38,62,10,44,26,60,8,48,20,54,14,40,62,8,46,16,52,12,58,22,42,60,6,50,18,56,10,46,32,58,8,44,22,52,16,62,8,40,26,54,18,48,10,60,20,44,12,52].forEach(h => {
+  const b = document.createElement('div'); b.className='bar';
+  b.style.cssText=`width:5px;height:${h}px;background:rgba(239,68,68,${.45+(h/62)*.55})`;
+  noisy.appendChild(b);
+});
+
+const clean = document.getElementById('clean');
+[4,8,16,24,32,38,44,50,54,56,54,52,48,44,38,32,26,22,18,14,10,14,22,30,38,46,52,56,58,56,54,50,46,40,34,28,22,16,12,8,10,18,26,34,42,48,54,56,56,52,48,42,36,30,24,18,12,8,6,4].forEach(h => {
+  const b = document.createElement('div'); b.className='bar';
+  b.style.cssText=`width:5px;height:${h}px;background:rgba(34,197,94,${.5+(h/58)*.5})`;
+  clean.appendChild(b);
+});
+</script>
+</body>
+</html>

@@ -36,3 +36,12 @@ bcrypt>=4.0.0
 # Stripe billing for the paid tier. Requires user-provided keys
 # (STRIPE_SECRET_KEY, STRIPE_WEBHOOK_SECRET, STRIPE_PRICE_*) at runtime.
 stripe>=8.0.0
+
+# Gemini Subscription provider — uses Google AI Pro consumer subscription
+# (via web cookies, not API key). Powers the "Google Gemini (Subscription)"
+# entry in the provider picker. Requires data/gemini_cookies.json populated
+# by Setup-Gemini-Subscription.command.
+gemini-webapi>=2.0.0
+# Used by Setup-Gemini-Subscription.command to auto-read cookies from
+# the user's Chrome browser session.
+browser_cookie3>=0.20.0

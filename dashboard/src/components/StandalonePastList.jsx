@@ -1,6 +1,6 @@
 import React, { useEffect, useState } from 'react';
 import { History, Loader2, RefreshCw, Trash2, Play, Download, RotateCcw, Check, X, CheckSquare, Square, Languages } from 'lucide-react';
-import { getApiUrl } from '../config';
+import { getApiUrl, buildLlmHeaders } from '../config';
 
 /**
  * Past projects panel rendered INSIDE a standalone feature page
@@ -108,7 +108,7 @@ export default function StandalonePastList({ kind, accent = 'orange', onOpen, on
         try {
             const r = await fetch(getApiUrl(`/api/standalone/${job.job_id}/resume`), {
                 method: 'POST',
-                headers: { 'Content-Type': 'application/json', ...(llmHeaders || {}) },
+                headers: { 'Content-Type': 'application/json', ...buildLlmHeaders(llmHeaders) },
             });
             if (!r.ok) throw new Error(await r.text());
             // Hand the job up to the parent so it can switch to the

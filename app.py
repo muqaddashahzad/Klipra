@@ -1,4 +1,5 @@
 import os
+import re
 import uuid
 import subprocess
 import threading
@@ -34,26 +35,58 @@ load_dotenv()
 UPLOAD_DIR = "uploads"
 OUTPUT_DIR = "output"
 
+# Providers that work WITHOUT an API key. Every "did the user send a key?"
+# gate must consult this set instead of hardcoding 'ollama', otherwise
+# keyless providers like gemini-subscription (cookie-based) get blocked
+# with a misleading "Missing API key" error.
+KEYLESS_LLM_PROVIDERS = {"ollama", "gemini-subscription"}
+
+
+_CACHE_BUST_QUERY_RE = re.compile(r"\?[vt]=\d+(?:&[vt]=\d+)*$")
+
+
+def _basename_for_disk(name: str) -> str:
+    """basename of a client-supplied filename, URL-decoded.
+
+    The frontend now percent-encodes '?'/'#'/spaces in clip URLs, and the
+    filename it posts back as `input_filename` is derived from that encoded
+    URL — so it can arrive as e.g. 'Is%20AI%20a%20THREAT%3F...clip_1.mp4'.
+    unquote turns it back into the real on-disk name. unquote is a no-op for
+    never-encoded names (they contain no %XX), so this is safe everywhere.
+    """
+    if not name:
+        return ""
+    from urllib.parse import unquote
+    try:
+        return os.path.basename(unquote(name))
+    except Exception:
+        return os.path.basename(name)
+
 
 def _clip_filename_from_url(video_url: str) -> str:
     """Extract a bare filename from a clip's `video_url`.
 
     The frontend (and our retrim/reframe endpoints) append a cache-buster
-    like `?v=12345` after re-rendering so the <video> tag reloads. Without
-    stripping that, splitting by '/' leaves the query string fused to the
-    filename and every subsequent disk lookup misses.
+    like `?v=12345` after re-rendering so the <video> tag reloads. We strip
+    ONLY that trailing cache-bust query — NOT every '?' — because a source
+    video's title can itself contain a literal '?' (e.g.
+    "Is AI a THREAT to Crypto? (...)_clip_1.mp4"). The old code split on the
+    FIRST '?', truncating such filenames and corrupting the on-disk lookup
+    (and, worse, the re-stored URL on retrim/subtitle/etc.).
     """
     if not video_url:
         return ""
-    name = video_url.split("?")[0].split("/")[-1]
+    from urllib.parse import unquote
+    # Drop only a trailing ?v=.../&t=... cache-bust, keep any '?' in the name.
+    cleaned = _CACHE_BUST_QUERY_RE.sub("", video_url)
+    name = cleaned.split("/")[-1]
     # The frontend may have URL-encoded the filename for the <video src>
-    # (we encode characters like $, spaces, en-dash). Decode it back to
-    # the on-disk name.
+    # (we encode '?', '#', spaces, etc.). Decode it back to the on-disk name.
     try:
-        from urllib.parse import unquote
-        return unquote(name)
+        decoded = unquote(name)
     except Exception:
-        return name
+        decoded = name
+    return decoded
 
 
 def _safe_filename(name: str) -> str:
@@ -83,6 +116,55 @@ def _safe_filename(name: str) -> str:
     return (base[:120] + ext)[:200]
 
 
+def _metadata_paths(output_dir: str) -> List[str]:
+    """Every on-disk metadata file for a job dir: the canonical
+    `metadata.json` first, then any legacy `*_metadata.json` sidecars.
+
+    Smart Clipper writes BOTH at creation (a canonical `metadata.json`
+    and a `{batch}_metadata.json` sidecar). Historically different
+    endpoints read/wrote different ones — `_apply_clip_change`/undo/dub
+    touched the globbed sidecar while motion-graphics/aspect/regenerate
+    touched `metadata.json` — so an edit saved through one path silently
+    vanished when another path read the other file. Returning the full
+    set lets writers update ALL copies (so they can never diverge) and
+    readers prefer the canonical one."""
+    paths: List[str] = []
+    canonical = os.path.join(output_dir, "metadata.json")
+    if os.path.isfile(canonical):
+        paths.append(canonical)
+    for p in sorted(glob.glob(os.path.join(output_dir, "*_metadata.json"))):
+        if p not in paths:
+            paths.append(p)
+    return paths
+
+
+def _load_metadata(output_dir: str) -> Optional[dict]:
+    """Load a job's clip metadata, preferring the canonical
+    `metadata.json` and falling back to the first readable sidecar.
+    Returns the parsed dict or None when nothing parses."""
+    for p in _metadata_paths(output_dir):
+        try:
+            with open(p, 'r') as f:
+                return json.load(f)
+        except Exception:
+            continue
+    return None
+
+
+def _save_metadata(output_dir: str, data: dict) -> None:
+    """Write `data` through to EVERY metadata file for the job (canonical
+    + every legacy sidecar), creating `metadata.json` when none exists.
+    This is what keeps the copies from diverging regardless of which
+    endpoint performs the write."""
+    paths = _metadata_paths(output_dir) or [os.path.join(output_dir, "metadata.json")]
+    for p in paths:
+        try:
+            with open(p, 'w') as f:
+                json.dump(data, f, indent=2)
+        except Exception as e:
+            print(f"⚠️  Failed to write {os.path.basename(p)}: {e}")
+
+
 def _apply_clip_change(
     job_id: str,
     clip_index: int,
@@ -107,17 +189,17 @@ def _apply_clip_change(
     Returns the new public URL (with `?v=<ts>` cache-bust).
     """
     output_dir = os.path.join(OUTPUT_DIR, job_id)
-    json_files = glob.glob(os.path.join(output_dir, "*_metadata.json"))
 
     # Mint a cache-bust suffix per call so the browser <video> reloads.
     cache_bust = int(time.time() * 1000)
     new_url = f"/videos/{job_id}/{new_filename}?v={cache_bust}"
 
-    # Update on-disk metadata so a page reload still shows the edit.
-    if json_files:
+    # Update on-disk metadata so a page reload still shows the edit. Read
+    # the canonical copy and write through to EVERY metadata file so the
+    # canonical `metadata.json` and the legacy sidecar never diverge.
+    data = _load_metadata(output_dir)
+    if data is not None:
         try:
-            with open(json_files[0], 'r') as f:
-                data = json.load(f)
             shorts = data.get('shorts', [])
             if 0 <= clip_index < len(shorts):
                 clip = shorts[clip_index]
@@ -138,8 +220,7 @@ def _apply_clip_change(
                     for k, v in extra.items():
                         clip[k] = v
                 data['shorts'] = shorts
-                with open(json_files[0], 'w') as f:
-                    json.dump(data, f, indent=2)
+                _save_metadata(output_dir, data)
         except Exception as e:
             print(f"⚠️  Failed to update metadata.json: {e}")
 
@@ -502,7 +583,9 @@ def _repair_clip_video_urls(job_id: str, job_dir: str, clips: list) -> bool:
     for i, clip in enumerate(clips):
         if not isinstance(clip, dict):
             continue
-        current = (clip.get("video_url") or "").split("?")[0]
+        # Strip only the trailing cache-bust query, NOT a '?' inside the
+        # filename (same bug class as _clip_filename_from_url).
+        current = _CACHE_BUST_QUERY_RE.sub("", (clip.get("video_url") or ""))
         # Valid shape is "/videos/<job>/<filename>".
         looks_valid = (
             current.startswith(f"/videos/{job_id}/")
@@ -510,7 +593,8 @@ def _repair_clip_video_urls(job_id: str, job_dir: str, clips: list) -> bool:
         )
         if looks_valid:
             # Even if the path looks valid, double-check the file exists.
-            fname = current.split("/")[-1]
+            from urllib.parse import unquote as _unq
+            fname = _unq(current.split("/")[-1])
             if os.path.exists(os.path.join(job_dir, fname)):
                 continue
         # Try the canonical filename for this clip index.
@@ -824,11 +908,24 @@ async def run_job(job_id, job_data):
                 pass
 
         returncode = process.returncode
-        
+
+        # ── Human-in-the-loop pause: a --transcribe-only run that exited 0 ──
+        # means the raw transcript is ready and we should WAIT for the user to
+        # clean it (instead of completing). Guard with 'continued' so the
+        # resumed full run completes normally.
+        if (returncode == 0
+                and jobs[job_id].get('pause_after_transcript')
+                and not jobs[job_id].get('continued')):
+            jobs[job_id]['status'] = 'awaiting_cleanup'
+            jobs[job_id]['logs'].append(
+                "Transcription done — paused for manual transcript cleanup. "
+                "Clean the transcript in an external AI, paste it back, and proceed.")
+            return
+
         if returncode == 0:
             jobs[job_id]['status'] = 'completed'
             jobs[job_id]['logs'].append("Process finished successfully.")
-            
+
             # Start S3 upload in background (silent, non-blocking)
             loop = asyncio.get_event_loop()
             loop.run_in_executor(None, upload_job_artifacts, output_dir, job_id)
@@ -894,7 +991,7 @@ async def run_job(job_id, job_data):
         jobs[job_id]['status'] = 'failed'
         jobs[job_id]['logs'].append(f"Execution error: {str(e)}")
 
-def _find_source_video(job_id: str, output_dir: str) -> str | None:
+def _find_source_video(job_id: str, output_dir: str | None = None) -> str | None:
     """Locate the original (non-clip) video for a finished job. Tries:
        1. jobs[job_id]['input_path'] (in-memory fast path — set at upload).
        2. UPLOAD_DIR/.{job_id}.link sidecar (written by _save_upload_dedup
@@ -933,6 +1030,9 @@ def _find_source_video(job_id: str, output_dir: str) -> str | None:
     # 4. The yt-dlp output sits in the job folder. main.py names clips
     # `<title>_clip_<N>.mp4` and keeps the original as `<title>.mp4` (or
     # whatever yt-dlp produced).
+    # Default the output dir to the job folder when the caller omits it.
+    if not output_dir:
+        output_dir = os.path.join(OUTPUT_DIR, job_id)
     if os.path.isdir(output_dir):
         candidates = []
         for f in os.listdir(output_dir):
@@ -947,9 +1047,26 @@ def _find_source_video(job_id: str, output_dir: str) -> str | None:
     return None
 
 
+class RetrimRange(BaseModel):
+    """One in/out range, both in absolute source-time seconds."""
+    start: float
+    end: float
+
+
 class RetrimRequest(BaseModel):
-    new_start: float
-    new_end: float
+    """The 'edit timing' contract.
+
+    Single-range case (backward compatible): set new_start + new_end. The
+    output clip is the chunk between those two timestamps.
+
+    Multi-range case (new): set `ranges` to a list of [{start, end}, ...].
+    The output clip is the concatenation of all ranges in chronological
+    order (auto-sorted by start), hard cut between segments — no transition.
+    new_start/new_end are ignored when ranges has >= 1 entry.
+    """
+    new_start: float = 0.0
+    new_end: float = 0.0
+    ranges: Optional[List[RetrimRange]] = None
 
 
 class Keyframe(BaseModel):
@@ -978,7 +1095,7 @@ def _find_thumbnail_for_job(job_id: str, output_dir: str, clips: list) -> Option
     fc = clips[0] if isinstance(clips[0], dict) else {}
     fc_url = fc.get("video_url") or ""
     if fc_url:
-        fname = fc_url.split("?")[0].split("/")[-1]
+        fname = _clip_filename_from_url(fc_url)
         if fname and os.path.exists(os.path.join(output_dir, fname)):
             return f"/videos/{job_id}/{fname}"
     # 2. Fallback: <base>_clip_1.mp4
@@ -1191,6 +1308,45 @@ async def serve_source_waveform(job_id: str, bins: int = 800):
         raise HTTPException(500, f"Failed to compute waveform: {e}")
 
 
+@app.get("/api/job/{job_id}/duration")
+async def serve_source_duration(job_id: str):
+    """Cheap ffprobe of the source duration so the timeline editor can lay
+    out its ruler + waveform instantly. The source is often a multi-GB
+    original whose moov atom sits at the END of the file, so a browser
+    <video preload="metadata"> has to download gigabytes before it knows the
+    duration — leaving the editor stuck on "Loading timeline…". ffprobe reads
+    only the container headers (seeks straight to the moov on local disk), so
+    it returns in ~0.1s regardless of file size. Cached after first compute."""
+    record = jobs.get(job_id)
+    output_dir = (record or {}).get("output_dir") or os.path.join(OUTPUT_DIR, job_id)
+    src = _find_source_video(job_id, output_dir)
+    if not src or not os.path.isfile(src):
+        raise HTTPException(410, "Source video missing.")
+    cache_path = os.path.join(output_dir, "_source_duration.json")
+    if os.path.isfile(cache_path):
+        try:
+            with open(cache_path) as f:
+                return json.load(f)
+        except Exception:
+            pass
+    try:
+        proc = subprocess.run(
+            ["ffprobe", "-v", "error", "-show_entries", "format=duration",
+             "-of", "default=nw=1:nk=1", src],
+            capture_output=True, text=True, timeout=30,
+        )
+        dur = float((proc.stdout or "0").strip() or 0)
+        payload = {"duration": dur}
+        try:
+            with open(cache_path, "w") as f:
+                json.dump(payload, f)
+        except Exception:
+            pass  # cache write is best-effort
+        return payload
+    except Exception as e:
+        raise HTTPException(500, f"Failed to probe duration: {e}")
+
+
 @app.post("/api/clip/{job_id}/{clip_index}/reframe-keyframes")
 async def reframe_keyframes(job_id: str, clip_index: int, req: ReframeKfRequest):
     """Re-render one clip with a keyframed pan. The keyframes' time axis
@@ -1208,6 +1364,17 @@ async def reframe_keyframes(job_id: str, clip_index: int, req: ReframeKfRequest)
         raise HTTPException(400, "At least one keyframe required")
 
     clip = clips[clip_index]
+    # Reframe pans a single continuous crop window. A clip stitched from
+    # disjoint source segments (multi-range retrim) has no single continuous
+    # timeline, so clip-local keyframe times can't be mapped to source frames
+    # correctly. Reject rather than silently produce a misaligned pan.
+    _ranges = clip.get("ranges")
+    if isinstance(_ranges, list) and len(_ranges) > 1:
+        raise HTTPException(
+            400,
+            "Reframe is unavailable on a multi-segment clip. Flatten it to a "
+            "single range with Edit timing first, then reframe.",
+        )
     output_dir = record.get("output_dir") or os.path.join(OUTPUT_DIR, job_id)
     source = _find_source_video(job_id, output_dir)
     if not source:
@@ -1231,10 +1398,18 @@ async def reframe_keyframes(job_id: str, clip_index: int, req: ReframeKfRequest)
         for kf in sorted_kfs
     ]
 
-    clip_filename = clip.get("video_url", "").split("?")[0].split("/")[-1]
+    clip_filename = _clip_filename_from_url(clip.get("video_url", ""))
     if not clip_filename:
         raise HTTPException(500, "Clip has no video_url")
-    clip_path = os.path.join(output_dir, clip_filename)
+    # Render to a NEW timestamped filename instead of overwriting the clip
+    # in place. The previous render must survive on disk so the per-clip
+    # Undo (which just re-points video_url at the prior file) actually has
+    # bytes to roll back to — overwriting made Undo a silent no-op. Strip a
+    # prior _reframe_/_retrim_ stamp first so the name doesn't grow forever.
+    _base, _ext = os.path.splitext(clip_filename)
+    _base = re.sub(r'_(reframe|retrim)_\d+$', '', _base)
+    new_filename = f"{_base}_reframe_{int(time.time() * 1000)}{_ext or '.mp4'}"
+    clip_path = os.path.join(output_dir, new_filename)
 
     # Write keyframes JSON to a temp file the subprocess reads.
     import tempfile
@@ -1262,7 +1437,7 @@ async def reframe_keyframes(job_id: str, clip_index: int, req: ReframeKfRequest)
         # Persist via the central helper — pushes prev URL onto history,
         # writes metadata.json, mirrors to in-memory job, mints cache-bust.
         _apply_clip_change(
-            job_id, clip_index, clip_filename,
+            job_id, clip_index, new_filename,
             operation='reframe',
             extra={
                 'keyframes': sanitized,
@@ -1296,8 +1471,31 @@ async def retrim_clip(job_id: str, clip_index: int, req: RetrimRequest):
 
     clip = clips[clip_index]
     output_dir = record.get("output_dir") or os.path.join(OUTPUT_DIR, job_id)
-    if req.new_start < 0 or req.new_end <= req.new_start + 1.0:
-        raise HTTPException(400, "Clip duration must be at least 1 second")
+
+    # Decide: multi-range mode or single-range mode? Multi if the client
+    # sent a `ranges` array with >= 1 entry; otherwise fall back to the
+    # original single-range (new_start, new_end) contract for backward
+    # compatibility with existing UIs / saved drafts.
+    use_multi = bool(req.ranges) and len(req.ranges) >= 1
+    if use_multi:
+        # Preserve the order the timeline editor sent. Each block in the
+        # sequence reel maps to one range, and the user can drag blocks to
+        # reorder them (e.g. show the punchline before the setup), so the
+        # concatenated output must follow that arrangement — NOT a forced
+        # chronological sort like the old single-direction behaviour.
+        normalized = [{"start": float(r.start), "end": float(r.end)} for r in req.ranges]
+        # Per-range sanity: positive duration, non-negative start
+        for i, r in enumerate(normalized):
+            if r["start"] < 0 or r["end"] <= r["start"]:
+                raise HTTPException(400, f"Range #{i+1}: end must be after start (got start={r['start']}, end={r['end']})")
+        total_duration = sum(r["end"] - r["start"] for r in normalized)
+        if total_duration < 1.0:
+            raise HTTPException(400, f"Total merged duration must be at least 1 second (got {total_duration:.2f}s)")
+    else:
+        if req.new_start < 0 or req.new_end <= req.new_start + 1.0:
+            raise HTTPException(400, "Clip duration must be at least 1 second")
+        normalized = [{"start": float(req.new_start), "end": float(req.new_end)}]
+        total_duration = req.new_end - req.new_start
 
     source = _find_source_video(job_id, output_dir)
     if not source:
@@ -1311,21 +1509,47 @@ async def retrim_clip(job_id: str, clip_index: int, req: RetrimRequest):
     clip_filename = _clip_filename_from_url(clip.get("video_url", ""))
     if not clip_filename:
         raise HTTPException(500, "Clip has no video_url")
-    clip_path = os.path.join(output_dir, clip_filename)
+    # Render to a NEW timestamped filename instead of overwriting the clip
+    # in place, so the prior render survives on disk for Undo (which only
+    # re-points video_url at the previous file). Strip a prior _retrim_/
+    # _reframe_ stamp first so the filename doesn't grow without bound.
+    _base, _ext = os.path.splitext(clip_filename)
+    _base = re.sub(r'_(reframe|retrim)_\d+$', '', _base)
+    new_filename = f"{_base}_retrim_{int(time.time() * 1000)}{_ext or '.mp4'}"
+    clip_path = os.path.join(output_dir, new_filename)
+
+    # Multi-range path: drop the ranges into a temp JSON file and pass
+    # it to retrim.py via --ranges-file. The script handles extract+concat.
+    ranges_file_path: Optional[str] = None
+    if use_multi or len(normalized) > 1:
+        import tempfile as _tf
+        with _tf.NamedTemporaryFile(suffix=".json", delete=False, mode="w") as f:
+            json.dump(normalized, f)
+            ranges_file_path = f.name
 
     # Spawn retrim.py — runs the cut + vertical pipeline in a subprocess
     # so torch/MediaPipe load only on demand.
     import asyncio
+    retrim_args = ["python", "-u", "retrim.py", "--source", source, "--output", clip_path]
+    if ranges_file_path:
+        retrim_args += ["--ranges-file", ranges_file_path]
+    else:
+        retrim_args += [
+            "--start", f"{normalized[0]['start']:.3f}",
+            "--end",   f"{normalized[0]['end']:.3f}",
+        ]
     proc = await asyncio.create_subprocess_exec(
-        "python", "-u", "retrim.py",
-        "--source", source,
-        "--start", f"{req.new_start:.3f}",
-        "--end", f"{req.new_end:.3f}",
-        "--output", clip_path,
+        *retrim_args,
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
     )
     stdout, stderr = await proc.communicate()
+    # Cleanup the temp ranges file (best-effort)
+    if ranges_file_path:
+        try:
+            os.unlink(ranges_file_path)
+        except OSError:
+            pass
     if proc.returncode != 0:
         msg = (stderr or b"").decode("utf-8", errors="replace")[-1000:]
         raise HTTPException(500, f"Retrim failed: {msg}")
@@ -1335,10 +1559,26 @@ async def retrim_clip(job_id: str, clip_index: int, req: RetrimRequest):
     # keyframes and flag invalidation — the frontend shows a banner
     # offering to re-set them.
     had_keyframes = bool(clip.get("keyframes"))
+    # For multi-range edits, store the FULL ranges list and use the
+    # outermost (first.start, last.end) as the persisted "start/end"
+    # so the rest of the codebase that reads clip.start / clip.end
+    # gets a sensible total span. Single-range edits keep the old shape.
+    # clip.start/clip.end is the OUTER span used by the rest of the codebase
+    # (thumbnails, duration display, the player). With reorder support the
+    # ranges are no longer guaranteed chronological, so derive the span from
+    # the min start / max end rather than first/last, or a reordered clip
+    # could end up with start > end and break every duration consumer.
     extra = {
-        "start": req.new_start,
-        "end": req.new_end,
+        "start": min(r["start"] for r in normalized),
+        "end":   max(r["end"] for r in normalized),
     }
+    if len(normalized) > 1:
+        extra["ranges"] = normalized
+        extra["merged_duration"] = total_duration
+    else:
+        # Single-range: clear any stale 'ranges' from a previous multi-cut
+        extra["ranges"] = None
+        extra["merged_duration"] = None
     if had_keyframes:
         extra["keyframes"] = []
         extra["reframe_invalidated_at"] = int(time.time() * 1000)
@@ -1356,7 +1596,7 @@ async def retrim_clip(job_id: str, clip_index: int, req: RetrimRequest):
     extra["regenerated_transcript"] = None
 
     new_url = _apply_clip_change(
-        job_id, clip_index, clip_filename,
+        job_id, clip_index, new_filename,
         operation='retrim', extra=extra,
     )
     # Refresh the in-memory clip dict to return current state to the
@@ -1400,26 +1640,25 @@ async def undo_clip_change(job_id: str, clip_index: int):
     # know the URL "changed" to trigger a reload, even though it's
     # really an OLD file we're pointing back at.
     cache_bust = int(time.time() * 1000)
-    bare = prev_url.split('?')[0]
+    # Strip only a trailing cache-bust (?v=/&t=), NOT a '?' inside the filename.
+    bare = _CACHE_BUST_QUERY_RE.sub('', prev_url)
     restored_url = f"{bare}?v={cache_bust}"
 
     clip_mem['video_url'] = restored_url
     clip_mem['history'] = history
 
-    # Persist to metadata.json on disk.
+    # Persist to disk — write through to every metadata copy so undo can't
+    # be masked by a stale sidecar the next read happens to pick up.
     output_dir = os.path.join(OUTPUT_DIR, job_id)
-    json_files = glob.glob(os.path.join(output_dir, "*_metadata.json"))
-    if json_files:
+    data = _load_metadata(output_dir)
+    if data is not None:
         try:
-            with open(json_files[0], 'r') as f:
-                data = json.load(f)
             shorts = data.get('shorts', [])
             if 0 <= clip_index < len(shorts):
                 shorts[clip_index]['video_url'] = restored_url
                 shorts[clip_index]['history'] = history
                 data['shorts'] = shorts
-                with open(json_files[0], 'w') as f:
-                    json.dump(data, f, indent=2)
+                _save_metadata(output_dir, data)
         except Exception as e:
             print(f"⚠️  Undo: failed to persist metadata: {e}")
 
@@ -2306,20 +2545,10 @@ async def apply_motion_graphics(
         raise HTTPException(404, "Job not found")
     job = jobs[job_id]
     job_dir = job.get("output_dir") or os.path.join(OUTPUT_DIR, job_id)
-    metadata_path = os.path.join(job_dir, "metadata.json")
-    if not os.path.isfile(metadata_path):
-        # Generate Clips writes metadata under a different filename
-        # pattern; fall back to scanning the dir.
-        candidates = [
-            os.path.join(job_dir, f) for f in os.listdir(job_dir)
-            if f.endswith("metadata.json")
-        ]
-        if candidates:
-            metadata_path = candidates[0]
-        else:
-            raise HTTPException(404, "metadata.json not found")
-    with open(metadata_path, "r", encoding="utf-8") as f:
-        metadata = json.load(f)
+    # Read canonical-preferred (and we write through to every copy below).
+    metadata = _load_metadata(job_dir)
+    if metadata is None:
+        raise HTTPException(404, "metadata.json not found")
     shorts = metadata.get("shorts", [])
     if clip_idx < 0 or clip_idx >= len(shorts):
         raise HTTPException(404, "Clip index out of range")
@@ -2442,8 +2671,7 @@ async def apply_motion_graphics(
     clip["motion_graphics_plan"] = {"events": events}
     shorts[clip_idx] = clip
     metadata["shorts"] = shorts
-    with open(metadata_path, "w", encoding="utf-8") as f:
-        json.dump(metadata, f, indent=2)
+    _save_metadata(job_dir, metadata)
     if "result" in job and isinstance(job["result"], dict):
         job["result"]["clips"] = shorts
 
@@ -2477,17 +2705,9 @@ async def transcribe_clip(job_id: str, clip_idx: int):
         raise HTTPException(404, "Job not found")
     job = jobs[job_id]
     job_dir = job.get("output_dir") or os.path.join(OUTPUT_DIR, job_id)
-    metadata_path = os.path.join(job_dir, "metadata.json")
-    if not os.path.isfile(metadata_path):
-        candidates = [
-            os.path.join(job_dir, f) for f in os.listdir(job_dir)
-            if f.endswith("metadata.json")
-        ]
-        if not candidates:
-            raise HTTPException(404, "metadata.json not found")
-        metadata_path = candidates[0]
-    with open(metadata_path, "r", encoding="utf-8") as f:
-        metadata = json.load(f)
+    metadata = _load_metadata(job_dir)
+    if metadata is None:
+        raise HTTPException(404, "metadata.json not found")
     shorts = metadata.get("shorts", [])
     if clip_idx < 0 or clip_idx >= len(shorts):
         raise HTTPException(404, "Clip index out of range")
@@ -2606,18 +2826,10 @@ async def change_clip_aspect(job_id: str, clip_idx: int, req: AspectChangeReques
         raise HTTPException(404, "Job not found")
     job = jobs[job_id]
     job_dir = job.get("output_dir") or os.path.join(OUTPUT_DIR, job_id)
-    metadata_path = os.path.join(job_dir, "metadata.json")
-    if not os.path.isfile(metadata_path):
-        candidates = [
-            os.path.join(job_dir, f) for f in os.listdir(job_dir)
-            if f.endswith("metadata.json")
-        ]
-        if candidates:
-            metadata_path = candidates[0]
-        else:
-            raise HTTPException(404, "metadata.json not found")
-    with open(metadata_path, "r", encoding="utf-8") as f:
-        metadata = json.load(f)
+    # Read canonical-preferred (and we write through to every copy below).
+    metadata = _load_metadata(job_dir)
+    if metadata is None:
+        raise HTTPException(404, "metadata.json not found")
     shorts = metadata.get("shorts", [])
     if clip_idx < 0 or clip_idx >= len(shorts):
         raise HTTPException(404, "Clip index out of range")
@@ -2691,8 +2903,7 @@ async def change_clip_aspect(job_id: str, clip_idx: int, req: AspectChangeReques
     clip["aspect"] = aspect
     shorts[clip_idx] = clip
     metadata["shorts"] = shorts
-    with open(metadata_path, "w", encoding="utf-8") as f:
-        json.dump(metadata, f, indent=2)
+    _save_metadata(job_dir, metadata)
     if "result" in job and isinstance(job["result"], dict):
         job["result"]["clips"] = shorts
 
@@ -2860,7 +3071,7 @@ async def process_endpoint(
         or request.headers.get("X-Gemini-Key")
         or ""
     )
-    if provider_id != "ollama" and not api_key:
+    if provider_id not in KEYLESS_LLM_PROVIDERS and not api_key:
         raise HTTPException(
             status_code=400,
             detail="Missing API key. Send X-LLM-Key (or legacy X-Gemini-Key).",
@@ -2984,6 +3195,18 @@ async def process_endpoint(
 
     cmd.extend(["-o", job_output_dir])
 
+    # ── Human-in-the-loop cleanup pause ──────────────────────────────────
+    # When X-Pause-After-Transcript=1, run main.py with --transcribe-only so
+    # it stops right after transcription. run_job() flips the job to
+    # 'awaiting_cleanup' instead of 'completed'. The user cleans the
+    # transcript externally and resumes via /api/process/continue, which
+    # re-queues `full_cmd` (the full pipeline, no --transcribe-only) with the
+    # injected transcript + skip-cleanup.
+    pause_after_transcript = (request.headers.get("X-Pause-After-Transcript") == "1")
+    full_cmd = list(cmd)  # snapshot WITHOUT the flag, for the resume run
+    if pause_after_transcript:
+        cmd.append("--transcribe-only")
+
     # Enqueue Job
     jobs[job_id] = {
         'status': 'queued',
@@ -2996,8 +3219,33 @@ async def process_endpoint(
         # in memory. None for URL-ingest jobs (yt-dlp drops the source
         # in the job folder; _find_source_video covers that case).
         'input_path': input_path if not url else None,
+        # ── pause/resume bookkeeping ──
+        'pause_after_transcript': pause_after_transcript,
+        'continued': False,
+        'full_cmd': full_cmd,
+        # The four inputs to _transcript_cache_key — persisted so the resume
+        # endpoint can recompute the SAME cache key and inject into it.
+        'transcribe_provider': env.get("OPENSHORTS_TRANSCRIBE_PROVIDER", "whisper"),
+        'forced_lang': env.get("OPENSHORTS_TRANSCRIPT_LANG", ""),
+        'whisper_model': env.get("OPENSHORTS_WHISPER_MODEL", "large-v3-turbo"),
     }
-    
+    # Survive a backend restart during the pause: drop the resume metadata to
+    # disk so /api/process/continue can reconstruct everything.
+    if pause_after_transcript:
+        try:
+            with open(os.path.join(job_output_dir, "_pause_meta.json"), "w") as _pf:
+                json.dump({
+                    "full_cmd": full_cmd,
+                    "env": env,
+                    "input_path": input_path,
+                    "url": url or None,
+                    "transcribe_provider": env.get("OPENSHORTS_TRANSCRIBE_PROVIDER", "whisper"),
+                    "forced_lang": env.get("OPENSHORTS_TRANSCRIPT_LANG", ""),
+                    "whisper_model": env.get("OPENSHORTS_WHISPER_MODEL", "large-v3-turbo"),
+                }, _pf)
+        except Exception:
+            pass
+
     await job_queue.put(job_id)
     
     return {"job_id": job_id, "status": "queued"}
@@ -3013,6 +3261,162 @@ async def get_status(job_id: str):
         "logs": job['logs'],
         "result": job.get('result')
     }
+
+
+@app.get("/api/job/{job_id}/transcript")
+async def get_paused_transcript(job_id: str):
+    """Return the raw transcript captured during a --transcribe-only run,
+    for the human-in-the-loop cleanup UI. Reads <job_dir>/_raw_transcript.json
+    (survives a backend restart)."""
+    job_dir = os.path.join(OUTPUT_DIR, job_id)
+    raw_path = os.path.join(job_dir, "_raw_transcript.json")
+    if not os.path.isfile(raw_path):
+        raise HTTPException(404, "No paused transcript for this job.")
+    try:
+        with open(raw_path, "r", encoding="utf-8") as f:
+            t = json.load(f)
+    except Exception as e:
+        raise HTTPException(500, f"Could not read transcript: {e}")
+    segs = t.get("segments") or []
+    return {
+        "language": t.get("language", ""),
+        "text": t.get("text", ""),
+        "segments": [
+            {"text": (s.get("text") or "").strip(),
+             "start": float(s.get("start", 0) or 0),
+             "end": float(s.get("end", 0) or 0)}
+            for s in segs
+        ],
+        "line_count": len(segs),
+    }
+
+
+class ContinueWithTranscriptRequest(BaseModel):
+    job_id: str
+    cleaned_transcript: str
+
+
+@app.post("/api/process/continue")
+async def continue_with_transcript(req: ContinueWithTranscriptRequest):
+    """Phase 2 of human-in-the-loop cleanup. Take the user's externally-cleaned
+    transcript text, map it line-for-line onto the ORIGINAL Whisper segments
+    (keeping their timings), write it to <job_dir>/_cleaned_transcript.json, and
+    re-queue the FULL clip-gen pipeline with --cleaned-transcript so main.py
+    skips transcription + in-app AI cleanup and goes straight to clip selection.
+    """
+    job_id = req.job_id
+    job_dir = os.path.join(OUTPUT_DIR, job_id)
+    job = jobs.get(job_id)
+
+    if not job and not os.path.isdir(job_dir):
+        raise HTTPException(404, "Job not found. Re-upload the source video to start fresh.")
+    if job and job.get("status") == "processing":
+        raise HTTPException(409, "Job is currently running.")
+
+    # Load the original raw transcript (real Whisper timings).
+    raw_path = os.path.join(job_dir, "_raw_transcript.json")
+    if not os.path.isfile(raw_path):
+        raise HTTPException(409, "No paused transcript on disk for this job — cannot resume.")
+    with open(raw_path, "r", encoding="utf-8") as f:
+        orig = json.load(f)
+    segments = orig.get("segments") or []
+    if not segments:
+        raise HTTPException(409, "Original transcript has no segments.")
+
+    # Map the pasted lines onto segments. Empty/missing lines keep the original
+    # text so subtitles never vanish.
+    #
+    # Preferred path — NUMBERED lines ("12| text"): the prompt asks the external
+    # AI to return every line prefixed with its original number, optionally
+    # wrapped in a ``` code block. We strip the fences, ignore anything that
+    # isn't a numbered line (so a stray "Searched web: …" preamble or a "Here is
+    # the result:" header can't shift the mapping), and re-align each line by
+    # ITS number. That makes the alignment immune to merges/drops/reordering:
+    # a missing number just falls back to the original Urdu for that one line
+    # instead of cascade-desyncing every caption after it.
+    #
+    # Fallback path — plain lines (legacy / un-numbered paste): map by position,
+    # exactly as before.
+    raw = req.cleaned_transcript or ""
+    # Strip a single markdown code fence if present (```lang ... ```).
+    _fence = re.search(r"```[a-zA-Z0-9]*\n(.*?)```", raw, re.DOTALL)
+    if _fence:
+        raw = _fence.group(1)
+    all_lines = raw.split("\n")
+
+    numbered: dict[int, str] = {}
+    _num_re = re.compile(r"^\s*(\d+)\s*\|\s?(.*)$")
+    for ln in all_lines:
+        m = _num_re.match(ln)
+        if m:
+            idx = int(m.group(1))
+            if 1 <= idx <= len(segments):
+                numbered[idx] = m.group(2).strip()
+    use_numbered = len(numbered) >= max(1, len(segments) // 2)
+    plain_lines = all_lines  # positional fallback uses raw line positions
+
+    for i, seg in enumerate(segments):
+        orig_text = (seg.get("text") or "").strip()
+        if use_numbered:
+            new_text = numbered.get(i + 1, "") or orig_text
+        elif i < len(plain_lines) and plain_lines[i].strip():
+            new_text = plain_lines[i].strip()
+        else:
+            new_text = orig_text
+        seg["text"] = new_text
+        # Re-synthesize per-word timings evenly across the segment's ORIGINAL
+        # [start, end] (mirrors transcript_utils' cleanup behavior).
+        start = float(seg.get("start", 0) or 0)
+        end = float(seg.get("end", start) or start)
+        toks = new_text.split()
+        if toks and end > start:
+            per = (end - start) / len(toks)
+            seg["words"] = [
+                {"word": tok, "start": start + k * per, "end": start + (k + 1) * per}
+                for k, tok in enumerate(toks)
+            ]
+        else:
+            seg["words"] = []
+    orig["text"] = " ".join((s.get("text") or "") for s in segments).strip()
+
+    cleaned_path = os.path.join(job_dir, "_cleaned_transcript.json")
+    with open(cleaned_path, "w", encoding="utf-8") as f:
+        json.dump(orig, f, ensure_ascii=False, indent=2)
+
+    # Rebuild the full pipeline cmd (no --transcribe-only) + --cleaned-transcript.
+    # Recover full_cmd/env from the live job or from _pause_meta.json (restart).
+    full_cmd = None
+    env = None
+    if job and job.get("full_cmd"):
+        full_cmd = list(job["full_cmd"])
+        env = dict(job.get("env") or os.environ.copy())
+    else:
+        meta_path = os.path.join(job_dir, "_pause_meta.json")
+        if os.path.isfile(meta_path):
+            with open(meta_path, "r") as mf:
+                meta = json.load(mf)
+            full_cmd = list(meta.get("full_cmd") or [])
+            env = dict(meta.get("env") or os.environ.copy())
+    if not full_cmd:
+        raise HTTPException(409, "Cannot reconstruct the pipeline command after restart — re-upload to start fresh.")
+
+    env["OPENSHORTS_TRANSCRIPT_SCRIPT"] = "skip-cleanup"
+    resume_cmd = full_cmd + ["--cleaned-transcript", cleaned_path]
+
+    jobs[job_id] = {
+        **(job or {}),
+        "status": "queued",
+        "logs": [f"Resuming job {job_id} with your cleaned transcript ({len(segments)} segments)…"],
+        "cmd": resume_cmd,
+        "env": env,
+        "output_dir": job_dir,
+        "result": None,
+        "continued": True,
+        "pause_after_transcript": False,  # don't pause again
+    }
+
+    await job_queue.put(job_id)
+    return {"job_id": job_id, "status": "queued", "segments": len(segments)}
 
 
 @app.post("/api/retry/{job_id}")
@@ -3109,6 +3513,55 @@ async def retry_job(
         ]
         job["result"] = None
 
+    # ---------- Preserve a human-in-the-loop external cleanup on resume -----
+    # If the user cleaned the transcript in an external AI (=> there is a
+    # _cleaned_transcript.json on disk), make sure the resumed run keeps using
+    # it and skips in-app transcribe + AI cleanup — even after a backend
+    # restart wiped the original cmd/env. Without this, "Resume from
+    # checkpoint" silently re-transcribes and re-cleans, discarding the user's
+    # edited subtitles. We also restore the original job's LLM settings (incl.
+    # the keyless gemini-subscription provider, empty key) from the pause
+    # snapshot so the clip picker has a provider to call.
+    target = jobs[job_id]
+    cleaned_path = os.path.join(job_dir, "_cleaned_transcript.json")
+    if os.path.isfile(cleaned_path):
+        meta = {}
+        meta_path = os.path.join(job_dir, "_pause_meta.json")
+        if os.path.isfile(meta_path):
+            try:
+                with open(meta_path) as _mf:
+                    meta = json.load(_mf) or {}
+            except Exception:
+                meta = {}
+        meta_env = meta.get("env") or {}
+        if isinstance(meta_env, str):
+            try:
+                meta_env = json.loads(meta_env)
+            except Exception:
+                meta_env = {}
+        # Restore the job's own OPENSHORTS_* settings (provider, model, clip
+        # bounds, language, …) without clobbering container infra env (PATH,
+        # KLIPRA_WHISPER_SIDECAR_URL, etc.). Live jobs already carry these; the
+        # reconstructed-after-restart case is the one that needs the restore.
+        env = target.get("env") or os.environ.copy()
+        for _k, _v in (meta_env or {}).items():
+            if (_k.startswith("OPENSHORTS_") or _k == "GEMINI_API_KEY") and _v and not env.get(_k):
+                env[_k] = _v
+        env["OPENSHORTS_TRANSCRIPT_SCRIPT"] = "skip-cleanup"
+        target["env"] = env
+        # Base the resumed command on the pause snapshot's full pipeline cmd
+        # (the same one /api/process/continue uses) so every original flag
+        # survives; fall back to whatever cmd is already set. Then ensure the
+        # cleaned-transcript flag is attached exactly once.
+        base_cmd = list(meta.get("full_cmd") or target.get("cmd") or [])
+        if base_cmd and "--cleaned-transcript" not in base_cmd:
+            base_cmd += ["--cleaned-transcript", cleaned_path]
+        if base_cmd:
+            target["cmd"] = base_cmd
+        target.setdefault("logs", []).append(
+            "↻ Resuming with your externally-cleaned transcript (skipping transcribe + AI cleanup)."
+        )
+
     # ---------- SWITCH-AI override --------------------------------------
     # If the caller provided new provider/model/key headers, patch the
     # job's env dict in place so the resumed subprocess picks them up.
@@ -3175,7 +3628,7 @@ async def edit_clip(
     # Determine API Key — prefer the new multi-provider header
     final_api_key = x_llm_key or req.api_key or x_gemini_key or os.environ.get("GEMINI_API_KEY")
 
-    if not final_api_key:
+    if provider_id not in KEYLESS_LLM_PROVIDERS and not final_api_key:
         raise HTTPException(status_code=400, detail="Missing Gemini API Key (Header or Body)")
 
     if req.job_id not in jobs:
@@ -3189,12 +3642,15 @@ async def edit_clip(
         # Resolve Input Path: Prefer explict input_filename from frontend (chaining edits)
         if req.input_filename:
             # Security: Ensure just a filename, no paths
-            safe_name = os.path.basename(req.input_filename)
+            safe_name = _basename_for_disk(req.input_filename)
             input_path = os.path.join(OUTPUT_DIR, req.job_id, safe_name)
             filename = safe_name
         else:
             # Fallback to original clip
-            clip = job['result']['clips'][req.clip_index]
+            _clips = job['result']['clips']
+            if not (0 <= req.clip_index < len(_clips)):
+                raise HTTPException(status_code=404, detail=f"Clip index {req.clip_index} out of range")
+            clip = _clips[req.clip_index]
             filename = _clip_filename_from_url(clip['video_url'])
             input_path = os.path.join(OUTPUT_DIR, req.job_id, filename)
         
@@ -3296,6 +3752,10 @@ async def edit_clip(
             "edit_plan": plan,
         }
 
+    except HTTPException:
+        # Deliberate 404/4xx (e.g. clip not found) must pass through as-is,
+        # not get re-wrapped into a misleading 500 by the broad handler below.
+        raise
     except Exception as e:
         print(f"❌ Edit Error: {e}")
         raise HTTPException(status_code=500, detail=str(e))
@@ -3330,9 +3790,12 @@ async def edit_timeline(req: TimelineEditRequest):
     output_dir = os.path.join(OUTPUT_DIR, req.job_id)
 
     if req.input_filename:
-        filename = os.path.basename(req.input_filename)
+        filename = _basename_for_disk(req.input_filename)
     else:
-        clip = (job.get("result") or {}).get("clips", [])[req.clip_index]
+        _clips = (job.get("result") or {}).get("clips", [])
+        if not (0 <= req.clip_index < len(_clips)):
+            raise HTTPException(404, "Clip index out of range")
+        clip = _clips[req.clip_index]
         filename = _clip_filename_from_url(clip.get("video_url", ""))
     input_path = os.path.join(output_dir, filename) if filename else None
     if not input_path or not os.path.exists(input_path):
@@ -3510,9 +3973,12 @@ async def edit_region_preview(req: RegionPreviewRequest):
     output_dir = os.path.join(OUTPUT_DIR, req.job_id)
 
     if req.input_filename:
-        filename = os.path.basename(req.input_filename)
+        filename = _basename_for_disk(req.input_filename)
     else:
-        clip = (jobs[req.job_id].get("result") or {}).get("clips", [])[req.clip_index]
+        _clips = (jobs[req.job_id].get("result") or {}).get("clips", [])
+        if not (0 <= req.clip_index < len(_clips)):
+            raise HTTPException(404, "Clip index out of range")
+        clip = _clips[req.clip_index]
         filename = _clip_filename_from_url(clip.get("video_url", ""))
     input_path = os.path.join(output_dir, filename) if filename else None
     if not input_path or not os.path.exists(input_path):
@@ -3763,7 +4229,7 @@ async def regenerate_transcript(
     clip_data = clips[req.clip_index]
 
     if req.input_filename:
-        filename = os.path.basename(req.input_filename)
+        filename = _basename_for_disk(req.input_filename)
     else:
         filename = _clip_filename_from_url(clip_data.get('video_url', ''))
     input_path = os.path.join(output_dir, filename) if filename else None
@@ -3785,15 +4251,55 @@ async def regenerate_transcript(
     # explicitly keep English words/phrases in English script while
     # transliterating Hindi or Urdu words into Roman/Latin.
     if cleanup_mode in ("roman", "hinglish", "urglish", "translate"):
-        cleaned = _llm_rewrite_transcript(
-            transcript=fresh,
-            mode=cleanup_mode,
-            target_language=req.target_language,
-            provider_id=(x_llm_provider or "gemini").lower(),
-            model_name=x_llm_model or "gemini-2.5-flash",
-            api_key=x_llm_key or os.environ.get("GEMINI_API_KEY", ""),
-            base_url=x_llm_base_url,
-        )
+        _prov = (x_llm_provider or "gemini").lower()
+        try:
+            cleaned = _llm_rewrite_transcript(
+                transcript=fresh,
+                mode=cleanup_mode,
+                target_language=req.target_language,
+                provider_id=_prov,
+                model_name=x_llm_model or "gemini-2.5-flash",
+                api_key=x_llm_key or os.environ.get("GEMINI_API_KEY", ""),
+                base_url=x_llm_base_url,
+            )
+        except Exception as _llm_err:
+            # Turn raw provider exceptions (esp. Gemini's 429
+            # RESOURCE_EXHAUSTED) into a clear, actionable message instead
+            # of a generic 500 "Internal Server Error". The most common
+            # cause is the Gemini free-tier daily quota (20 req/day).
+            _msg = str(_llm_err)
+            if "429" in _msg or "RESOURCE_EXHAUSTED" in _msg or "quota" in _msg.lower() or "rate" in _msg.lower():
+                # Build a context-aware suggestion. If the user already has
+                # gemini.google.com cookies set up, point them at the
+                # Subscription provider (no API quota) FIRST since it's
+                # the same model family and zero-setup. Otherwise mention
+                # Ollama as the local fallback.
+                _has_sub_cookies = os.path.exists("/app/data/gemini_cookies.json")
+                if _prov == "gemini" and _has_sub_cookies:
+                    _suggestion = (
+                        "Switch the AI provider to 'Gemini · Subscription' "
+                        "(no API quota — uses your AI Pro cookies) in the "
+                        "provider picker and re-run."
+                    )
+                elif _prov == "gemini":
+                    _suggestion = (
+                        "Either: (1) run Setup-Gemini-Subscription.command "
+                        "to enable the 'Gemini · Subscription' provider that "
+                        "uses your AI Pro cookies (no quota), or (2) switch "
+                        "to Ollama in the provider picker (local, free)."
+                    )
+                else:
+                    _suggestion = (
+                        "Switch the AI provider to Ollama (free, runs "
+                        "locally, no quota) in the provider picker and re-run, "
+                        f"or wait a minute if you want to stay on {_prov}."
+                    )
+                raise HTTPException(
+                    429,
+                    f"The AI provider '{_prov}' hit its rate limit / daily "
+                    f"quota, so the {cleanup_mode} step couldn't run. {_suggestion}"
+                )
+            raise HTTPException(502, f"AI {cleanup_mode} step failed ({_prov}): {_msg[:280]}")
 
     # Persist the regenerated transcript so /api/subtitle can use it on
     # burn instead of re-transcribing again. Stored at clip-level so it
@@ -3801,8 +4307,9 @@ async def regenerate_transcript(
     try:
         clips[req.clip_index]['regenerated_transcript'] = cleaned
         data['shorts'] = clips
-        with open(json_files[0], 'w') as f:
-            json.dump(data, f, indent=2)
+        # Write through to every metadata copy so the canonical
+        # metadata.json and the legacy sidecar stay in lock-step.
+        _save_metadata(output_dir, data)
     except Exception as e:
         print(f"⚠️  Failed to persist regenerated transcript: {e}")
 
@@ -3819,6 +4326,10 @@ async def regenerate_transcript(
             for s in (cleaned.get("segments") or [])
         ],
         "cleanup_mode": cleanup_mode,
+        # Set when the transcript was already Latin/English so transliteration
+        # was a no-op — the UI shows this so the user knows to re-transcribe
+        # with Urdu/Hindi as the source language.
+        "warning": cleaned.get("transliteration_warning"),
     }
 
 
@@ -3988,7 +4499,7 @@ async def sync_transcript(req: SyncTranscriptRequest):
     else:
         # Fallback: run Whisper. Slow but correct.
         if req.input_filename:
-            filename = os.path.basename(req.input_filename)
+            filename = _basename_for_disk(req.input_filename)
         else:
             filename = _clip_filename_from_url(clip_data.get('video_url', ''))
         input_path = os.path.join(output_dir, filename) if filename else None
@@ -4092,8 +4603,8 @@ async def sync_transcript(req: SyncTranscriptRequest):
     try:
         clips[req.clip_index]["regenerated_transcript"] = synced_transcript
         data["shorts"] = clips
-        with open(json_files[0], "w") as f:
-            json.dump(data, f, indent=2)
+        # Write through to every metadata copy (canonical + sidecar).
+        _save_metadata(output_dir, data)
     except Exception as e:
         print(f"⚠️  Failed to persist synced transcript: {e}")
 
@@ -4363,8 +4874,8 @@ async def lyrics_align(job_id: str, clip_index: int, req: LyricsAlignRequest):
         if 'subtitles_invalidated_at' in clips[clip_index]:
             clips[clip_index]['subtitles_invalidated_at'] = None
         data['shorts'] = clips
-        with open(json_files[0], 'w') as f:
-            json.dump(data, f, indent=2)
+        # Write through to every metadata copy (canonical + sidecar).
+        _save_metadata(output_dir, data)
         # Mirror to in-memory job so refresh-free flows pick it up.
         mem_clips = (record.get('result') or {}).get('clips') or []
         if 0 <= clip_index < len(mem_clips):
@@ -5616,10 +6127,27 @@ async def standalone_subtitle_transcribe(
             # export. Times are in clip-local seconds.
             seg_payload = []
             for s in (transcript.get("segments") or []):
+                # Carry per-word timings through to the frontend so the
+                # styling preview can animate word-by-word (karaoke /
+                # word-highlight / pop). Without this the preview only ever
+                # saw {text,start,end} and every per-word animation silently
+                # degraded to a static line. The frontend still synthesizes
+                # evenly-spaced words as a fallback when this is absent.
+                words_out = []
+                for w in (s.get("words") or []):
+                    tok = (w.get("word") or w.get("text") or "").strip()
+                    if not tok:
+                        continue
+                    words_out.append({
+                        "word": tok,
+                        "start": float(w.get("start", 0)),
+                        "end": float(w.get("end", 0)),
+                    })
                 seg_payload.append({
                     "text": (s.get("text") or "").strip(),
                     "start": float(s.get("start", 0)),
                     "end": float(s.get("end", 0)),
+                    "words": words_out,
                 })
             _standalone_status(
                 job_id, "transcript_ready", "Phase 1 done — review the transcript.",
@@ -5726,6 +6254,140 @@ class StandaloneBurnRequest(BaseModel):
     # subtitle styling step. Defaults to True to keep every existing
     # call site working unchanged.
     burn_subtitles: Optional[bool] = True
+    # VIDEO HOOK OVERLAY — optional punchy text rendered on top of the
+    # finished (subtitled) video, reusing the exact same renderer the clip
+    # tool uses (hooks.add_hook_to_video → Pillow PNG + ffmpeg overlay).
+    # When hook_text is empty/None no hook is applied. Mirrors the clip
+    # HookRequest fields so the same HookModal payload works unchanged.
+    hook_text: Optional[str] = None
+    hook_position: Optional[str] = "top"      # top | center | bottom
+    hook_size: Optional[str] = "M"            # S | M | L
+    hook_text_color: Optional[str] = "#000000"
+    hook_bg_color: Optional[str] = "#FFFFFF"
+    hook_bg_opacity: Optional[float] = 0.94
+    hook_y_offset: Optional[float] = None     # 0..100, % from top; overrides preset
+    # NEW flexible 2-D hook placement (preferred over hook_position/_y_offset):
+    #   h_align left|center|right, v_align top|center|bottom, margins in px.
+    hook_h_align: Optional[str] = "center"
+    hook_v_align: Optional[str] = None
+    hook_margin_x: Optional[int] = 40
+    hook_margin_y: Optional[int] = 40
+    # IMAGE OVERLAYS — logos / stickers / cutouts dropped onto the Phase-2
+    # preview. Each item: { data_url (base64 data: URL), start, end (sec),
+    # x_pct, y_pct (CENTRE position 0..100), width_pct (of frame width) }.
+    # Composited server-side after the subtitle burn (and below the hook)
+    # so the burned mp4 matches the live preview. None/empty = none.
+    image_overlays: Optional[List[Dict[str, Any]]] = None
+
+
+def _decode_data_url_to_file(data_url: str, dest_no_ext: str) -> Optional[str]:
+    """Decode a `data:image/<fmt>;base64,<...>` URL to a file on disk.
+    Returns the written path (with the matching extension) or None on any
+    problem. SVG is rejected (ffmpeg needs librsvg to rasterise it, which
+    isn't guaranteed in the container)."""
+    import base64 as _b64
+    m = re.match(r"^data:image/([a-zA-Z0-9.+-]+);base64,(.*)$", data_url or "", re.DOTALL)
+    if not m:
+        return None
+    fmt = (m.group(1) or "png").lower()
+    ext = {"jpeg": "jpg", "svg+xml": "svg"}.get(fmt, fmt)
+    if ext == "svg":
+        return None
+    try:
+        raw = _b64.b64decode(m.group(2), validate=False)
+    except Exception:
+        return None
+    if not raw:
+        return None
+    path = f"{dest_no_ext}.{ext}"
+    try:
+        with open(path, "wb") as fh:
+            fh.write(raw)
+    except OSError:
+        return None
+    return path
+
+
+def _burn_image_overlays_sync(video_path: str, overlays: list, job_dir: str, out_path: str) -> Optional[str]:
+    """Composite drag-dropped image overlays onto `video_path`, writing
+    `out_path`. Each overlay is scaled to width_pct of the frame width and
+    centred on (x_pct, y_pct), shown only between [start, end]. Returns
+    out_path on success, None on any failure (caller then keeps the
+    un-overlaid video). Best-effort — never raises."""
+    try:
+        if not overlays:
+            return None
+        probe = subprocess.run(
+            ["ffprobe", "-v", "error", "-select_streams", "v:0",
+             "-show_entries", "stream=width,height", "-of", "csv=p=0:s=x", video_path],
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        )
+        try:
+            w_s, h_s = probe.stdout.decode().strip().split("x")[:2]
+            vid_w, vid_h = int(w_s), int(h_s)
+        except Exception:
+            return None
+        if vid_w <= 0 or vid_h <= 0:
+            return None
+
+        inputs = ["-i", video_path]
+        filt: list[str] = []
+        label = "0:v"
+        used = 0
+        for idx, ov in enumerate(overlays):
+            if not isinstance(ov, dict):
+                continue
+            data_url = ov.get("data_url") or ""
+            if not isinstance(data_url, str) or not data_url.startswith("data:image/"):
+                continue
+            img_path = _decode_data_url_to_file(
+                data_url, os.path.join(job_dir, f"overlay_{int(time.time())}_{idx}")
+            )
+            if not img_path:
+                continue
+            try:
+                start = max(0.0, float(ov.get("start", 0)))
+                end = float(ov.get("end", 0))
+                wpct = max(1.0, min(100.0, float(ov.get("width_pct", 30))))
+                xpct = max(0.0, min(100.0, float(ov.get("x_pct", 50))))
+                ypct = max(0.0, min(100.0, float(ov.get("y_pct", 50))))
+            except (TypeError, ValueError):
+                continue
+            if end <= start:
+                continue
+            scaled_w = max(2, int(round(vid_w * wpct / 100.0)))
+            scaled_w -= scaled_w % 2  # even width keeps libx264 happy
+            inputs += ["-i", img_path]
+            s_lbl, o_lbl = f"ov{used}", f"t{used}"
+            filt.append(f"[{used + 1}:v]scale={scaled_w}:-1[{s_lbl}]")
+            # x_pct/y_pct are the CENTRE; overlay x/y are the TOP-LEFT corner,
+            # so shift by half the post-scale overlay size (overlay_w/_h).
+            x_expr = f"{xpct / 100.0:.4f}*main_w-overlay_w/2"
+            y_expr = f"{ypct / 100.0:.4f}*main_h-overlay_h/2"
+            filt.append(
+                f"[{label}][{s_lbl}]overlay=x='{x_expr}':y='{y_expr}'"
+                f":enable='between(t,{start:.3f},{end:.3f})'[{o_lbl}]"
+            )
+            label = o_lbl
+            used += 1
+
+        if used == 0:
+            return None
+
+        cmd = ["ffmpeg", "-y", *inputs,
+               "-filter_complex", ";".join(filt),
+               "-map", f"[{label}]", "-map", "0:a?",
+               "-c:v", "libx264", "-preset", "veryfast", "-crf", "18",
+               "-pix_fmt", "yuv420p", "-c:a", "copy", out_path]
+        proc = subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+        if proc.returncode != 0 or not (os.path.isfile(out_path) and os.path.getsize(out_path) > 1024):
+            _err = (proc.stderr or b"").decode("utf-8", errors="replace")[-500:]
+            print(f"⚠️  Image-overlay composite failed (rc={proc.returncode}): {_err}")
+            return None
+        return out_path
+    except Exception as _ov_err:
+        print(f"⚠️  Image-overlay composite raised: {_ov_err}")
+        return None
 
 
 @app.post("/api/standalone/subtitle/burn")
@@ -5961,6 +6623,12 @@ async def standalone_subtitle_burn(req: StandaloneBurnRequest):
             transcript["text"] = " ".join(s.get("text", "") for s in segs)
 
     async def run():
+        # output_path / output_filename are defined in the enclosing function
+        # (above) and READ early here (the subtitle-burn call), then optionally
+        # REASSIGNED later by the image-overlay pass. Without `nonlocal`, that
+        # later assignment makes them locals for the whole nested function, so
+        # the early reads raise "cannot access free variable 'output_path'…".
+        nonlocal output_path, output_filename
         try:
             _standalone_status(req.job_id, "rendering", "Phase 2: burning subtitles…")
 
@@ -6120,7 +6788,17 @@ async def standalone_subtitle_burn(req: StandaloneBurnRequest):
                 # refines the per-SEGMENT start/end so the segment-level
                 # SRT already gets precise audio-aligned timing — no
                 # need to flip into word-level mode.
-                ok = generate_srt_per_segment(burn_transcript, 0.0, 1e9, srt_path)
+                #
+                # split_long=False — render the editor's segments 1:1. They
+                # are ALREADY the final on-screen captions (pre-split by
+                # _split_long_segments + the timeline editor), and the live
+                # preview sizes the font to fit the WHOLE segment on two
+                # lines. Re-splitting here would produce shorter blocks that
+                # skip the shrink, making the burned font LARGER than the
+                # selected/preview size (the user's bug). 1:1 keeps the burn
+                # identical to the preview.
+                ok = generate_srt_per_segment(burn_transcript, 0.0, 1e9, srt_path,
+                                              split_long=False)
                 if not ok:
                     raise RuntimeError("Failed to write SRT.")
                 loop = asyncio.get_event_loop()
@@ -6140,6 +6818,66 @@ async def standalone_subtitle_burn(req: StandaloneBurnRequest):
                     animation=(req.animation or 'none'),
                     highlight_color=(req.highlight_color or '#FFDD00'),
                 ))
+            # VIDEO HOOK OVERLAY — final pass. If the user added a hook on
+            # the styling page, burn it on top of the subtitled video using
+            # the SAME renderer the clip tool uses (hooks.add_hook_to_video).
+            # We run it on the just-produced output_path and, if it succeeds,
+            # point the result at the hooked file. Failure is non-fatal — the
+            # subtitled video is still returned.
+            # IMAGE OVERLAYS — composite the user's dropped logos / stickers /
+            # cutouts onto the subtitled video so the burned mp4 matches the
+            # live preview. Runs BELOW the hook (the hook is the topmost text)
+            # and updates output_path/output_filename so the hook pass below
+            # operates on the overlaid frame. Best-effort: on any failure the
+            # un-overlaid (still subtitled) video is kept.
+            _img_overlays = req.image_overlays or []
+            if _img_overlays:
+                try:
+                    _standalone_status(req.job_id, "rendering", "Adding image overlays…")
+                    ov_filename = f"overlaid_{int(time.time())}.mp4"
+                    ov_path = os.path.join(job_dir, ov_filename)
+                    loop = asyncio.get_event_loop()
+                    _ov_result = await loop.run_in_executor(
+                        None,
+                        lambda: _burn_image_overlays_sync(output_path, _img_overlays, job_dir, ov_path),
+                    )
+                    if _ov_result and os.path.exists(ov_path):
+                        output_path = ov_path
+                        output_filename = ov_filename
+                        print(f"🖼️  Image overlays applied → {ov_filename}")
+                except Exception as _ov_e:
+                    print(f"⚠️  Image overlay pass failed (returning subtitled video): {_ov_e}")
+
+            final_filename = output_filename
+            _hook_text = (req.hook_text or "").strip()
+            if _hook_text:
+                try:
+                    _standalone_status(req.job_id, "rendering", "Adding your hook…")
+                    from hooks import add_hook_to_video
+                    _hook_scale = {"S": 0.8, "M": 1.0, "L": 1.3}.get(
+                        (req.hook_size or "M").upper(), 1.0)
+                    hooked_filename = f"hooked_{int(time.time())}.mp4"
+                    hooked_path = os.path.join(job_dir, hooked_filename)
+                    loop = asyncio.get_event_loop()
+                    await loop.run_in_executor(None, lambda: add_hook_to_video(
+                        output_path, _hook_text, hooked_path,
+                        position=(req.hook_position or "top"),
+                        font_scale=_hook_scale,
+                        text_color=(req.hook_text_color or "#000000"),
+                        bg_color=(req.hook_bg_color or "#FFFFFF"),
+                        bg_opacity=(req.hook_bg_opacity if req.hook_bg_opacity is not None else 0.94),
+                        y_offset_pct=req.hook_y_offset,
+                        h_align=(req.hook_h_align or "center"),
+                        v_align=req.hook_v_align,
+                        margin_x=(req.hook_margin_x if req.hook_margin_x is not None else 40),
+                        margin_y=(req.hook_margin_y if req.hook_margin_y is not None else 40),
+                    ))
+                    if os.path.exists(hooked_path):
+                        final_filename = hooked_filename
+                        print(f"🪝 Hook overlay applied → {hooked_filename}")
+                except Exception as _hook_err:
+                    print(f"⚠️  Hook overlay failed (returning subtitled video): {_hook_err}")
+
             # Cache the burn settings on the job so /change-background can
             # re-burn with the same look without the client re-sending all
             # fields. Stored in-memory + persisted via _standalone_persist.
@@ -6162,7 +6900,7 @@ async def standalone_subtitle_burn(req: StandaloneBurnRequest):
             _standalone_status(
                 req.job_id, "completed", "Done.",
                 result={
-                    "video_url": f"/videos/standalone_{req.job_id}/{output_filename}",
+                    "video_url": f"/videos/standalone_{req.job_id}/{final_filename}",
                     "transcript_text": transcript.get("text", ""),
                     "phase": 2,
                 },
@@ -7044,6 +7782,12 @@ async def standalone_subtitle_import_srt(
     # LLM cleanup, the user just clicks Burn.
     _standalone_status(job_id, "transcript_ready", "Imported subtitles ready to burn.")
     standalone_jobs[job_id]["result"] = {
+        # phase 1 = "transcript ready, awaiting style+burn". The frontend's
+        # refresh-rehydrate only restores the transcript/segments when it
+        # sees phase === 1, so an imported-SRT job MUST advertise it too —
+        # otherwise a browser refresh dropped the user back to an empty
+        # upload screen and "lost" the imported subtitles.
+        "phase": 1,
         "language": "imported",
         "transcript_text": transcript.get("text", ""),
         "segments": [
@@ -7208,7 +7952,7 @@ def _change_background_core(rec: dict,
 
     # Persist the new burn as the current result.
     rec['result'] = {**(rec.get('result') or {}),
-                     'video_url': f"/videos/standalone/{job_id}/{os.path.basename(output_path)}",
+                     'video_url': f"/videos/standalone_{job_id}/{os.path.basename(output_path)}",
                      'video_filename': os.path.basename(output_path)}
     rec['last_burn_settings'] = settings
     _standalone_status(job_id, "completed", "Background swapped + subtitles re-burned.")
@@ -7402,15 +8146,25 @@ async def standalone_subtitle_regenerate(
                 }
                 for s in (new_transcript.get("segments") or [])
             ]
+            # If the source was already Latin/English there was nothing to
+            # transliterate — make that loud so the user doesn't think the
+            # feature is broken. The status message + result.warning are both
+            # shown by the UI.
+            _warn = new_transcript.get("transliteration_warning")
+            _done_msg = (
+                f"⚠️ {_warn}" if _warn
+                else "Regeneration done — review the new transcript."
+            )
             _standalone_status(
                 req.job_id, "transcript_ready",
-                "Regeneration done — review the new transcript.",
+                _done_msg,
                 result={
                     "transcript_text": new_transcript.get("text", ""),
                     "language": new_transcript.get("language", ""),
                     "segments_count": len(seg_payload),
                     "segments": seg_payload,
                     "phase": 1,
+                    "warning": _warn,
                 },
             )
         except Exception as e:
@@ -8774,7 +9528,7 @@ async def standalone_dub_burn_subtitles(job_id: str, req: DubBurnSubtitlesReques
     # The video_url is `/videos/standalone_<id>/<filename>` — translate
     # back to a filesystem path inside the job's output_dir.
     job_dir = rec.get("output_dir") or os.path.join(OUTPUT_DIR, f"standalone_{job_id}")
-    dubbed_filename = dubbed_url.split("?")[0].split("/")[-1]
+    dubbed_filename = _clip_filename_from_url(dubbed_url)
     dubbed_path = os.path.join(job_dir, dubbed_filename)
     if not os.path.isfile(dubbed_path):
         raise HTTPException(
@@ -9754,7 +10508,7 @@ async def oauth_callback(
                 print(f"OAuth {provider} user creation failed: {e}")
                 return _oauth_failure_redirect("no_email")
 
-            print(f"DEBUG: user={user}, type={type(user)}, oauth_created={locals().get('oauth_created')}"); session_token = _accounts.create_session(user["id"])
+            session_token = _accounts.create_session(user["id"])
 
             # Fire a welcome email ONLY when a brand-new account was
             # created via this OAuth — not on every login. The helper
@@ -10035,7 +10789,7 @@ async def generate_effects_config(
     provider_id = (x_llm_provider or "gemini").lower()
     final_api_key = x_llm_key or x_gemini_key or os.environ.get("GEMINI_API_KEY")
 
-    if not final_api_key:
+    if provider_id not in KEYLESS_LLM_PROVIDERS and not final_api_key:
         raise HTTPException(status_code=400, detail="Missing API key (X-LLM-Key)")
 
     if req.job_id not in jobs:
@@ -10048,7 +10802,7 @@ async def generate_effects_config(
     try:
         # Resolve input path
         if req.input_filename:
-            safe_name = os.path.basename(req.input_filename)
+            safe_name = _basename_for_disk(req.input_filename)
             input_path = os.path.join(OUTPUT_DIR, req.job_id, safe_name)
         else:
             clip = job['result']['clips'][req.clip_index]
@@ -10227,7 +10981,9 @@ async def add_subtitles(
     # Optional: transliterate or translate the transcript before subtitle
     # generation. Useful when Whisper outputs Hindi/Urdu/Arabic/etc. but
     # the user wants Roman/Latin script ("Roman Urdu") or another language.
-    if script_mode in ("roman", "translate"):
+    # MUST include hinglish/urglish (code-switch transliteration) — omitting
+    # them silently burned the raw Arabic/Devanagari script instead.
+    if script_mode in ("roman", "hinglish", "urglish", "translate"):
         transcript = _llm_rewrite_transcript(
             transcript=transcript,
             mode=script_mode,
@@ -10247,7 +11003,7 @@ async def add_subtitles(
     # Video Path
     if req.input_filename:
         # Use chained file
-        filename = os.path.basename(req.input_filename)
+        filename = _basename_for_disk(req.input_filename)
     else:
         # Fallback to standard naming
         filename = _clip_filename_from_url(clip_data.get('video_url', ''))
@@ -10267,7 +11023,15 @@ async def add_subtitles(
     srt_filename = f"subs_{req.clip_index}_{cache_bust}.srt"
     srt_path = os.path.join(output_dir, srt_filename)
 
-    output_filename = f"subtitled_{cache_bust}_{filename}"
+    # Build a SAFE output filename: strip filesystem-hostile chars from the
+    # stem (esp. '?', which truncated URLs and made FFmpeg see an
+    # extension-less output → "Invalid argument" muxer error) and ALWAYS
+    # end in .mp4 even if the incoming `filename` lost its extension.
+    _stem, _ext = os.path.splitext(filename)
+    _safe_stem = re.sub(r'[<>:"/\\|?*]', '', _stem).strip() or "clip"
+    if _ext.lower() != ".mp4":
+        _ext = ".mp4"
+    output_filename = f"subtitled_{cache_bust}_{_safe_stem}{_ext}"
     output_path = os.path.join(output_dir, output_filename)
     
     try:
@@ -10298,7 +11062,7 @@ async def add_subtitles(
         # set, the per-word SRT generator produces subtitles that light
         # up the moment each word is actually spoken — which is what
         # users actually want from "synced subtitles".
-        used_rewrite = (script_mode in ("roman", "translate"))
+        used_rewrite = (script_mode in ("roman", "hinglish", "urglish", "translate"))
         used_edited_text = bool(req.edited_text)
         word_aligned = bool(transcript and transcript.get('_word_timings_aligned'))
         # Word-level for: synced transcripts (real Whisper word timings)
@@ -10391,6 +11155,14 @@ class HookRequest(BaseModel):
     # When provided, takes precedence over the `position` preset so users
     # can drag the hook to any spot via the slider in the modal.
     y_offset: Optional[float] = None
+    # NEW flexible 2-D placement (preferred over position/y_offset when set):
+    #   h_align: left|center|right, v_align: top|center|bottom,
+    #   margin_x/margin_y: px gap from the hugged edge. Lets the user pin the
+    #   hook to any corner (e.g. top-right, 50 px in from top & right).
+    h_align: Optional[str] = "center"
+    v_align: Optional[str] = None
+    margin_x: Optional[int] = 40
+    margin_y: Optional[int] = 40
 
 @app.post("/api/hook")
 async def add_hook(req: HookRequest):
@@ -10413,7 +11185,7 @@ async def add_hook(req: HookRequest):
     # repeat applies stack on each other rather than rendering the same
     # original over and over.
     if req.input_filename:
-        filename = os.path.basename(req.input_filename)
+        filename = _basename_for_disk(req.input_filename)
     else:
         filename = _clip_filename_from_url(clip_data.get('video_url', ''))
         if not filename:
@@ -10442,6 +11214,10 @@ async def add_hook(req: HookRequest):
                 bg_color=req.bg_color or "#FFFFFF",
                 bg_opacity=float(req.bg_opacity if req.bg_opacity is not None else 0.94),
                 y_offset_pct=req.y_offset,
+                h_align=req.h_align or "center",
+                v_align=req.v_align,
+                margin_x=req.margin_x if req.margin_x is not None else 40,
+                margin_y=req.margin_y if req.margin_y is not None else 40,
             )
         loop = asyncio.get_event_loop()
         await loop.run_in_executor(None, run_hook)
@@ -10525,7 +11301,7 @@ async def translate_clip(
 
     # Video Path
     if req.input_filename:
-        filename = os.path.basename(req.input_filename)
+        filename = _basename_for_disk(req.input_filename)
     else:
         filename = _clip_filename_from_url(clip_data.get('video_url', ''))
         if not filename:
@@ -10572,7 +11348,7 @@ async def translate_clip(
             # 2. Translate via the user's chosen LLM.
             provider_id = (x_llm_provider or "gemini").lower()
             llm_key = x_llm_key or os.environ.get("GEMINI_API_KEY")
-            if provider_id != "ollama" and not llm_key:
+            if provider_id not in KEYLESS_LLM_PROVIDERS and not llm_key:
                 raise HTTPException(
                     status_code=400,
                     detail="LLM key required for translation (X-LLM-Key).",
@@ -10718,9 +11494,9 @@ async def translate_clip(
         try:
             clips.append({**new_clip})
             data['shorts'] = clips
-            with open(json_files[0], 'w') as f:
-                json.dump(data, f, indent=4)
-                print(f"✅ Added dubbed clip [{req.target_language}] as new entry; original preserved")
+            # Write through to every metadata copy (canonical + sidecar).
+            _save_metadata(output_dir, data)
+            print(f"✅ Added dubbed clip [{req.target_language}] as new entry; original preserved")
         except Exception as e:
             print(f"⚠️ Failed to update metadata.json: {e}")
     else:
@@ -11036,7 +11812,10 @@ async def thumbnail_analyze(
 
         if url:
             from main import download_youtube_video
-            video_path, _ = download_youtube_video(url, UPLOAD_DIR)
+            # Run the (multi-minute) yt-dlp download off the event loop so it
+            # doesn't freeze every other concurrent request.
+            loop = asyncio.get_event_loop()
+            video_path, _ = await loop.run_in_executor(None, download_youtube_video, url, UPLOAD_DIR)
         else:
             video_path = os.path.join(UPLOAD_DIR, f"thumb_{session_id}_{file.filename}")
             with open(video_path, "wb") as buffer:
@@ -11263,15 +12042,18 @@ async def thumbnail_publish(
     if not video_path or not os.path.exists(video_path):
         raise HTTPException(status_code=404, detail="Original video file not found")
 
-    # Resolve thumbnail path from URL
+    # Resolve thumbnail path from URL — with realpath containment so a
+    # crafted thumbnail_url like '../../../../etc/passwd' can't escape the
+    # thumbnails dir and exfiltrate an arbitrary file to Upload-Post.
     thumb_relative = thumbnail_url.lstrip("/")
-    if thumb_relative.startswith("thumbnails/"):
-        thumb_path = os.path.join(OUTPUT_DIR, thumb_relative)
-    else:
-        thumb_path = os.path.join(THUMBNAILS_DIR, thumb_relative)
+    base = OUTPUT_DIR if thumb_relative.startswith("thumbnails/") else THUMBNAILS_DIR
+    thumb_path = os.path.realpath(os.path.join(base, thumb_relative))
+    root = os.path.realpath(base)
+    if not (thumb_path == root or thumb_path.startswith(root + os.sep)):
+        raise HTTPException(status_code=400, detail="Invalid thumbnail path")
 
     if not os.path.exists(thumb_path):
-        raise HTTPException(status_code=404, detail=f"Thumbnail file not found: {thumb_path}")
+        raise HTTPException(status_code=404, detail="Thumbnail file not found")
 
     # Generate a unique ID for this publish job so the frontend can poll
     publish_id = str(uuid.uuid4())
@@ -11703,16 +12485,22 @@ async def video_html_page(video_id: str):
     title = html_mod.escape(meta.get("title", "Untitled"))
     caption = html_mod.escape(meta.get("caption", ""))
     narration = html_mod.escape(meta.get("full_narration", ""))
-    video_url = meta.get("video_url", "")
-    actor_url = meta.get("actor_url", "")
+    # All of these flow from user-controlled `script`/metadata into raw HTML
+    # (attributes, body, og/twitter meta) — escape every one to prevent stored
+    # XSS on this PUBLIC gallery page.
+    video_url = html_mod.escape(meta.get("video_url", ""))
+    actor_url = html_mod.escape(meta.get("actor_url", ""))
     duration = meta.get("duration", 0)
     mode = meta.get("video_mode", "")
     product = html_mod.escape(meta.get("product_name", ""))
-    product_url = html_mod.escape(meta.get("product_url", ""))
-    language = meta.get("language", "en")
-    hashtags = " ".join(meta.get("hashtags", []))
+    # product_url goes into <a href> — html.escape does NOT block a
+    # javascript:/data: scheme, so whitelist http(s) first, then escape.
+    _raw_purl = meta.get("product_url", "") or ""
+    product_url = html_mod.escape(_raw_purl) if _raw_purl.lower().startswith(("http://", "https://")) else ""
+    language = html_mod.escape(meta.get("language", "en"))
+    hashtags = html_mod.escape(" ".join(str(h) for h in meta.get("hashtags", []) if h))
     cost = meta.get("cost_estimate", {}).get("total", 0)
-    created = meta.get("created_at", "")
+    created = html_mod.escape(str(meta.get("created_at", "")))
     actor_desc = html_mod.escape(meta.get("actor_description", ""))
 
     ld_json = f'{{"@context":"https://schema.org","@type":"VideoObject","name":"{title}","description":"{caption}","thumbnailUrl":"{actor_url}","contentUrl":"{video_url}","uploadDate":"{created}","duration":"PT{int(duration)}S","width":1080,"height":1920,"inLanguage":"{language}"}}'
@@ -11764,7 +12552,7 @@ h1{{font-size:22px;font-weight:700;margin-bottom:8px}}
 <div class="section"><h2>Caption</h2><p>{caption}</p><p style="color:#8b5cf6;margin-top:4px">{hashtags}</p></div>
 <div class="section"><h2>Script</h2><p>{narration}</p></div>
 <div class="section"><h2>Actor</h2><p>{actor_desc}</p></div>
-{f'<div class="section"><h2>Product</h2><p><a href="{product_url}" style="color:#8b5cf6" target="_blank">{product}</a></p></div>' if product_url else ''}
+{f'<div class="section"><h2>Product</h2><p><a href="{product_url}" style="color:#8b5cf6" target="_blank" rel="noopener noreferrer">{product}</a></p></div>' if product_url else ''}
 <a href="/gallery">← Back to Gallery</a>
 <br><a href="/" class="cta">Create Your Own</a>
 </div>
@@ -11859,8 +12647,12 @@ async def saasshorts_generate(
             except Exception:
                 pass
         else:
-            src = os.path.join(OUTPUT_DIR, req.selected_actor_url.replace("/videos/", ""))
-            if os.path.exists(src):
+            # Realpath containment — a crafted selected_actor_url like
+            # '/videos/../../etc/passwd' must not escape OUTPUT_DIR.
+            rel = req.selected_actor_url.replace("/videos/", "", 1).lstrip("/")
+            src = os.path.realpath(os.path.join(OUTPUT_DIR, rel))
+            root = os.path.realpath(OUTPUT_DIR).rstrip(os.sep) + os.sep
+            if (src + os.sep).startswith(root) and os.path.isfile(src):
                 selected_actor_path = src
 
     config = {

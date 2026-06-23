@@ -724,12 +724,23 @@ export default function SmartClipper({
                                     return 0;
                                 })();
                                 return (
-                                    <button
+                                    // div+role, NOT <button>: the card contains nested
+                                    // <button>s (Download / Try again) and button-in-button
+                                    // is invalid HTML — browsers reparent the inner button
+                                    // out of the outer one, breaking layout and clicks.
+                                    <div
                                         key={m.id}
-                                        type="button"
+                                        role="button"
+                                        tabIndex={0}
                                         onClick={() => setSelectedModelId(m.id)}
+                                        onKeyDown={(e) => {
+                                            if (e.key === 'Enter' || e.key === ' ') {
+                                                e.preventDefault();
+                                                setSelectedModelId(m.id);
+                                            }
+                                        }}
                                         className={
-                                            'text-left rounded-xl border p-3 transition relative ' +
+                                            'text-left rounded-xl border p-3 transition relative cursor-pointer ' +
                                             (isSelected
                                                 ? `${meta.bg} ring-2 ${meta.ring} border-white/20`
                                                 : 'bg-black/30 border-white/10 hover:border-white/20')
@@ -816,7 +827,7 @@ export default function SmartClipper({
                                                 </div>
                                             </div>
                                         )}
-                                    </button>
+                                    </div>
                                 );
                             })}
                         </div>
@@ -914,7 +925,7 @@ export default function SmartClipper({
                     <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 mb-4">
                         <NumberInput label="How many clips" value={targetClips} setValue={setTargetClips} min={1} max={12} />
                         <NumberInput label="Min duration (s)" value={minDuration} setValue={setMinDuration} min={5} max={120} />
-                        <NumberInput label="Max duration (s)" value={maxDuration} setValue={setMaxDuration} min={10} max={180} />
+                        <NumberInput label="Max duration (s)" value={maxDuration} setValue={setMaxDuration} min={10} max={300} />
                     </div>
 
                     {/* Mode picker — Fast (single VLM call) vs Pro (staged pipeline). */}

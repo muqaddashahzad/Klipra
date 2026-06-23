@@ -79,13 +79,20 @@ RUN echo "deb http://deb.debian.org/debian bookworm contrib" > /etc/apt/sources.
     fonts-dejavu \
     fonts-dejavu-extra \
     fonts-liberation \
-    ttf-mscorefonts-installer \
     # Color emoji font — required for the viral-hook burn pipeline
     # (hooks.py renders the hook headline via Pillow; without an
     # emoji-capable font, glyphs like 👽 / 🇺🇸 come out as tofu squares
     # instead of the colorful icons shown in the preview).
     fonts-noto-color-emoji \
     fonts-symbola \
+    # NOTE: ttf-mscorefonts-installer (Arial/Times) is intentionally OMITTED.
+    # Its Debian package downloads the .exe fonts from SourceForge at build
+    # time; the build sandbox can't reach SourceForge, so the installer hangs
+    # retrying ~10 mirrors at a 60s timeout each and then fails the build
+    # (apt exit 100) — this is what blocked the gemini-webapi rebuild. It's
+    # non-essential: fonts-liberation (installed above) is metric-compatible
+    # with Arial (Liberation Sans), and fontconfig auto-substitutes it for any
+    # "Arial" request, so subtitle/hook rendering is visually unchanged.
     && fc-cache -fv \
     && rm -rf /var/lib/apt/lists/*
 

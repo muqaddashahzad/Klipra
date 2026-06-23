@@ -119,6 +119,23 @@ export function longestWrappedLineChars(segments) {
 }
 
 /**
+ * Longest SEGMENT (caption block) length in characters, ignoring wrapping.
+ * This is the input to the 2-line capacity shrink: we decide font size by
+ * whether the whole caption fits across two wrapped lines, NOT by a single
+ * pre-wrapped line. Using this (instead of longestWrappedLineChars) is what
+ * lets the user's font-size slider actually change the rendered size — the
+ * old one-line shrink pinned the size to a constant whenever text overflowed.
+ */
+export function longestSegmentChars(segments) {
+    let longest = 0;
+    for (const s of segments || []) {
+        const n = ((s && s.text) || '').trim().length;
+        if (n > longest) longest = n;
+    }
+    return longest;
+}
+
+/**
  * Returns the shrink ratio (0..1) the burn pipeline would apply for the
  * given inputs, OR 1.0 if no shrink is needed. Multiply your requested
  * font-size by this to get the size the burn will actually use.
@@ -126,21 +143,36 @@ export function longestWrappedLineChars(segments) {
  * Inputs are unitless because we operate on a ratio:
  *   - requestedFontsize: the slider's chosen size (any unit)
  *   - longestLineChars : output of longestWrappedLineChars(segments)
- *   - frameWidthUnits  : frame width in the same conceptual unit as
- *                        fontsize (e.g. both in pixels). The ratio cancels.
+ *   - frameWidthUnits  : frame width in REAL PIXELS (e.g. 1080 for a 9:16
+ *                        frame of a 1920-tall reference). Must be real px
+ *                        because the margin floor/cap below are absolute px.
  *   - fontName         : resolved (post-fallback) font, drives glyph-em.
  *
- * marginPct mirrors the backend default (0.06 = 3% on each side).
+ * Mirrors subtitles.py exactly: horizontal margins are
+ *   margin_h = clamp(5% of width, 40px, 100px)  on EACH side,
+ * the drawable area is (width − 2·margin_h), and the overflow guard adds a
+ * 2% safety buffer on top of that drawable area. Keep this in lock-step with
+ * srt_to_ass()/compute_safe_fontsize() so preview == burn.
+ *
+ * TWO-LINE MODEL: `charCount` is the longest SEGMENT's total length, and the
+ * text is allowed to wrap across `maxLines` lines (default 2). We only shrink
+ * if the caption can't fit in that many lines at the requested size — so for
+ * normal-length captions the ratio is 1.0 and the user's font-size slider is
+ * fully respected (the old one-line model pinned the size to a constant
+ * whenever a line overflowed, which is why resizing "did nothing").
  */
 export function computeSafeShrinkRatio({
-    requestedFontsize, longestLineChars, frameWidthUnits, fontName,
-    marginPct = 0.06, minPx = 12,
+    requestedFontsize, charCount, frameWidthUnits, fontName,
+    maxLines = 2, minPx = 12,
 }) {
-    if (!requestedFontsize || !longestLineChars || !frameWidthUnits) return 1.0;
+    if (!requestedFontsize || !charCount || !frameWidthUnits) return 1.0;
     const glyphEm = avgGlyphEmForFont(fontName);
-    const safeWidth = frameWidthUnits * (1.0 - marginPct);
-    const requestedLineWidth = requestedFontsize * glyphEm * longestLineChars;
-    if (requestedLineWidth <= safeWidth) return 1.0;
-    const safeFontsize = Math.max(minPx, safeWidth / (glyphEm * longestLineChars));
+    const marginH = Math.max(40, Math.min(frameWidthUnits * 0.05, 100));
+    const drawable = Math.max(1, frameWidthUnits - 2 * marginH);
+    const safeWidth = drawable * 0.98;            // 2% buffer — matches burn margin_pct
+    const capacity = safeWidth * Math.max(1, maxLines);  // total width across N lines
+    const requestedTotalWidth = requestedFontsize * glyphEm * charCount;
+    if (requestedTotalWidth <= capacity) return 1.0;
+    const safeFontsize = Math.max(minPx, capacity / (glyphEm * charCount));
     return safeFontsize / requestedFontsize;
 }

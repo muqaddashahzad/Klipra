@@ -232,3 +232,15 @@ services:
       TORCH_HOME: /app/.cache/torch
       HF_HOME: /app/.cache/huggingface
     restart: unless-stopped
+
+  # ---- Podcast Recorder Studio (klipra-podcast) ----
+  # High-fidelity remote audio/video podcast recording studio. Exposes port 3000.
+  podcast:
+    build: ./klipra-podcast
+    container_name: klipra-podcast
+    ports:
+      - "3000:3000"
+    volumes:
+      - ./klipra-podcast:/app
+      - /app/node_modules
+    restart: unless-stopped

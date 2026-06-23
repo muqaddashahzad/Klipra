@@ -1,0 +1,380 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Klipra Podcast Studio - Premium Remote Recording</title>
+  <!-- Google Fonts -->
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=Outfit:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+  <!-- FontAwesome Icons -->
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+  <!-- Stylesheet -->
+  <link rel="stylesheet" href="style.css?v=2.0.0">
+  <!-- Socket.io -->
+  <script src="/socket.io/socket.io.js"></script>
+</head>
+<body>
+
+  <!-- App Container -->
+  <div id="app">
+    
+    <!-- Header / Branding -->
+    <header class="app-header">
+      <div class="logo">
+        <span class="logo-icon"><i class="fa-solid fa-microphone-lines"></i></span>
+        <h1>Klipra<span>Podcast</span></h1>
+      </div>
+      <div id="connection-indicator" class="connection-badge disconnected">
+        <span class="dot"></span> <span class="label">Disconnected</span>
+      </div>
+    </header>
+
+    <!-- Main Workspace -->
+    <main class="app-content">
+
+      <!-- ================= LOBBY VIEW ================= -->
+      <section id="lobby-view" class="view-panel">
+        <div class="lobby-card glass-panel">
+          <div class="lobby-header">
+            <h2>Join the Podcast Room</h2>
+            <p>Configure your audio and video before entering the studio.</p>
+          </div>
+
+          <div class="lobby-grid">
+            <!-- Left Side: Config & Inputs -->
+            <div class="lobby-form">
+              <!-- Join Mode Selection -->
+              <div class="tab-selector">
+                <button type="button" id="tab-host" class="tab-btn active" onclick="setRole(true)">
+                  <i class="fa-solid fa-crown"></i> Host Room
+                </button>
+                <button type="button" id="tab-guest" class="tab-btn" onclick="setRole(false)">
+                  <i class="fa-solid fa-user-astronaut"></i> Join as Guest
+                </button>
+              </div>
+
+              <!-- Input Fields -->
+              <div class="form-group">
+                <label for="username"><i class="fa-solid fa-user"></i> Display Name</label>
+                <input type="text" id="username" placeholder="Enter your name..." value="Host User">
+              </div>
+
+              <div class="form-group">
+                <label for="room-id"><i class="fa-solid fa-door-open"></i> Studio Room Name</label>
+                <input type="text" id="room-id" placeholder="e.g. weekly-podcast" value="demo-podcast">
+              </div>
+
+              <!-- Device Selection -->
+              <div class="device-selectors">
+                <h3>Hardware Configuration</h3>
+                
+                <div class="form-group">
+                  <label for="video-source"><i class="fa-solid fa-video"></i> Camera</label>
+                  <select id="video-source" class="select-input"></select>
+                </div>
+
+                <div class="form-group">
+                  <label for="audio-source"><i class="fa-solid fa-microphone"></i> Microphone</label>
+                  <select id="audio-source" class="select-input"></select>
+                </div>
+              </div>
+
+              <!-- Advanced Podcast Audio Controls -->
+              <div class="audio-settings-card">
+                <h3>Studio Audio Processing</h3>
+                <p class="subtitle">Disable processing for raw audio if you are wearing headphones.</p>
+                
+                <div class="toggle-group">
+                  <div class="toggle-item">
+                    <div>
+                      <span class="setting-title">Echo Cancellation</span>
+                      <span class="setting-desc">Prevents speaker feedback</span>
+                    </div>
+                    <label class="switch">
+                      <input type="checkbox" id="echo-cancellation" checked>
+                      <span class="slider"></span>
+                    </label>
+                  </div>
+
+                  <div class="toggle-item">
+                    <div>
+                      <span class="setting-title">Noise Suppression</span>
+                      <span class="setting-desc">Filters background noise</span>
+                    </div>
+                    <label class="switch">
+                      <input type="checkbox" id="noise-suppression" checked>
+                      <span class="slider"></span>
+                    </label>
+                  </div>
+
+                  <div class="toggle-item">
+                    <div>
+                      <span class="setting-title">Auto Gain Control</span>
+                      <span class="setting-desc">Normalizes vocal volumes</span>
+                    </div>
+                    <label class="switch">
+                      <input type="checkbox" id="auto-gain" checked>
+                      <span class="slider"></span>
+                    </label>
+                  </div>
+                </div>
+              </div>
+
+              <!-- Virtual Backgrounds -->
+              <div class="audio-settings-card">
+                <h3>Studio Video Processing</h3>
+                <div class="toggle-group">
+                  <div class="toggle-item">
+                    <div>
+                      <span class="setting-title">Blur Background</span>
+                      <span class="setting-desc">Apply simulated blur filter</span>
+                    </div>
+                    <label class="switch">
+                      <input type="checkbox" id="blur-background">
+                      <span class="slider"></span>
+                    </label>
+                  </div>
+                </div>
+              </div>
+
+              <!-- Enter Studio Button -->
+              <button id="enter-studio-btn" class="btn btn-primary btn-large">
+                <span>Enter Studio Room</span> <i class="fa-solid fa-right-to-bracket"></i>
+              </button>
+            </div>
+
+            <!-- Right Side: Webcam Live Preview -->
+            <div class="lobby-preview">
+              <div class="preview-container glass-panel">
+                <canvas id="lobby-preview-canvas" style="display:none; width:100%; height:100%; object-fit:cover; transform:scaleX(-1);"></canvas>
+                <video id="lobby-preview-video" autoplay playsinline muted></video>
+                <div class="preview-overlay">
+                  <span class="preview-badge"><i class="fa-solid fa-eye"></i> Camera Preview</span>
+                </div>
+                <!-- Simple visualizer for mic test -->
+                <div class="mic-test-bar">
+                  <div class="mic-icon"><i class="fa-solid fa-microphone"></i></div>
+                  <div class="progress-bar-container">
+                    <div id="mic-test-progress" class="progress-bar" style="width: 0%"></div>
+                  </div>
+                </div>
+              </div>
+              <div class="headphones-reminder warning-card">
+                <i class="fa-solid fa-headphones"></i>
+                <div class="reminder-text">
+                  <strong>Headphones Recommended</strong>
+                  <p>To record high-quality raw audio, turn off Echo Cancellation and wear headphones.</p>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- ================= STUDIO VIEW ================= -->
+      <section id="studio-view" class="view-panel" style="display: none;">
+        
+        <!-- Recording Header Banner -->
+        <div class="studio-top-bar glass-panel">
+          <div class="room-info">
+            <span class="studio-label">STUDIO ROOM</span>
+            <h2 id="display-room-name">weekly-podcast</h2>
+          </div>
+          
+          <div class="recording-dashboard">
+            <div id="recording-indicator" class="recording-badge idle">
+              <span class="record-dot"></span>
+              <span id="recording-text" class="record-status-label">NOT RECORDING</span>
+            </div>
+            <div id="recording-timer" class="timer-display">00:00:00</div>
+          </div>
+
+          <div class="guest-sync-badge">
+            <span class="sync-title">Guest Sync:</span>
+            <span id="guest-sync-status" class="sync-status text-yellow">Idle</span>
+          </div>
+        </div>
+
+        <div class="studio-workspace">
+          
+          <!-- Video Stream Area -->
+          <div class="video-grid-container">
+            <!-- Grid container for dynamic layout toggles -->
+            <div class="video-grid layout-grid" id="main-video-grid">
+              
+              <!-- Host Feed -->
+              <div class="video-card glass-panel" id="card-host">
+                <div class="video-wrapper">
+                  <canvas id="local-video-canvas" style="display:none; width:100%; height:100%; object-fit:cover; transform:scaleX(-1);"></canvas>
+                  <video id="local-video" autoplay playsinline muted></video>
+                  <div class="video-tint"></div>
+                  <!-- Audio volume overlay -->
+                  <div class="audio-overlay">
+                    <canvas id="local-waveform" class="waveform-canvas"></canvas>
+                  </div>
+                </div>
+                <div class="card-footer">
+                  <span class="participant-name" id="local-name">Host (You)</span>
+                  <span id="local-rec-badge" class="track-rec-badge idle">Local Idle</span>
+                </div>
+              </div>
+
+              <!-- Guest Feed -->
+              <div class="video-card glass-panel" id="card-guest">
+                <div class="video-wrapper">
+                  <!-- Fallback template when guest isn't connected -->
+                  <div id="guest-placeholder" class="placeholder-overlay">
+                    <i class="fa-solid fa-circle-user avatar-placeholder animate-pulse"></i>
+                    <p>Waiting for Guest to join...</p>
+                    <button class="btn btn-secondary btn-sm" id="invite-btn" onclick="copyInviteLink()">
+                      <i class="fa-solid fa-copy"></i> Copy Invite Link
+                    </button>
+                  </div>
+                  <video id="remote-video" autoplay playsinline></video>
+                  <div class="video-tint"></div>
+                  <!-- Audio volume overlay -->
+                  <div class="audio-overlay">
+                    <canvas id="remote-waveform" class="waveform-canvas"></canvas>
+                  </div>
+                </div>
+                <div class="card-footer">
+                  <span class="participant-name" id="remote-name">Guest</span>
+                  <span id="remote-rec-badge" class="track-rec-badge idle">Guest Offline</span>
+                </div>
+              </div>
+
+              <!-- Shared Screen Feed (Hidden by default) -->
+              <div class="video-card glass-panel hidden" id="card-screen">
+                <div class="video-wrapper">
+                  <video id="screen-video" autoplay playsinline></video>
+                  <!-- Drawing board for live annotation overlays -->
+                  <canvas id="drawing-board" class="drawing-overlay-canvas"></canvas>
+                  
+                  <!-- Floating annotation toolbar -->
+                  <div id="annotation-toolbar" class="annotation-toolbar-ui hidden">
+                    <button class="tool-btn active" id="tool-pen" title="Draw Pen"><i class="fa-solid fa-pen"></i></button>
+                    <button class="tool-btn" id="tool-text" title="Add Text"><i class="fa-solid fa-font"></i></button>
+                    <div class="divider"></div>
+                    <button class="color-swatch active color-red" data-color="#ff4757"></button>
+                    <button class="color-swatch color-green" data-color="#2ed573"></button>
+                    <button class="color-swatch color-blue" data-color="#1e90ff"></button>
+                    <button class="color-swatch color-yellow" data-color="#ffa502"></button>
+                    <div class="divider"></div>
+                    <button class="tool-btn danger" id="tool-clear" title="Clear drawings"><i class="fa-solid fa-trash-can"></i></button>
+                  </div>
+                </div>
+                <div class="card-footer">
+                  <span class="participant-name" id="screen-sharer-name">Shared Screen</span>
+                  <span class="track-rec-badge saved">Annotation Active</span>
+                </div>
+              </div>
+
+            </div>
+          </div>
+
+          <!-- Controls and Download Panel Sidebar -->
+          <aside class="studio-sidebar glass-panel">
+            
+            <!-- Recording Center -->
+            <div class="sidebar-section recording-center">
+              <h3>Studio Recording</h3>
+              <div class="studio-buttons-container">
+                <!-- Host-Only Controls -->
+                <button id="record-btn" class="btn btn-danger btn-large full-width host-only">
+                  <i class="fa-solid fa-circle"></i> Start Recording
+                </button>
+                <div class="recording-info-box">
+                  <p class="recording-notice"><strong>Crash-Proof Stream:</strong> WebRTC tracks are saved directly to your hard drive in real time to guarantee 0% data loss.</p>
+                </div>
+              </div>
+            </div>
+
+            <!-- Dynamic Layout Config (Host Only) -->
+            <div class="sidebar-section host-only">
+              <h3>Studio Layouts</h3>
+              <div class="layout-controls-row">
+                <button class="layout-btn active" id="layout-btn-grid" onclick="switchLayout('grid')" title="Split Grid">
+                  <i class="fa-solid fa-table-cells-large"></i> Grid
+                </button>
+                <button class="layout-btn" id="layout-btn-theater" onclick="switchLayout('theater')" title="Theater view">
+                  <i class="fa-solid fa-magnifying-glass-plus"></i> Theater
+                </button>
+                <button class="layout-btn" id="layout-btn-pip" onclick="switchLayout('pip')" title="Overlay / PiP">
+                  <i class="fa-solid fa-images"></i> Overlay
+                </button>
+                <button class="layout-btn" id="layout-btn-host-solo" onclick="switchLayout('host-solo')" title="Solo Me (Host Solo)">
+                  <i class="fa-solid fa-user"></i> Solo Me
+                </button>
+                <button class="layout-btn" id="layout-btn-guest-solo" onclick="switchLayout('guest-solo')" title="Solo Guest">
+                  <i class="fa-solid fa-user-astronaut"></i> Solo Guest
+                </button>
+              </div>
+            </div>
+
+            <!-- Client Hardware Controls -->
+            <div class="sidebar-section hardware-controls">
+              <h3>Local Controls</h3>
+              <div class="control-row">
+                <button id="mute-mic-btn" class="btn-circle" title="Mute Microphone">
+                  <i class="fa-solid fa-microphone"></i>
+                </button>
+                <button id="mute-video-btn" class="btn-circle" title="Disable Camera">
+                  <i class="fa-solid fa-video"></i>
+                </button>
+                <!-- Screen share toggle -->
+                <button id="screen-share-btn" class="btn-circle" title="Share Screen">
+                  <i class="fa-solid fa-display"></i>
+                </button>
+              </div>
+            </div>
+
+            <!-- Post-Recording Tracks Download Panel -->
+            <div class="sidebar-section downloads-panel">
+              <h3>Recorded Tracks</h3>
+              <div id="tracks-list" class="tracks-list empty">
+                <div class="no-tracks">
+                  <i class="fa-solid fa-compact-disc"></i>
+                  <p>Finished recording tracks will appear here for instant download.</p>
+                </div>
+              </div>
+            </div>
+
+            <!-- Console log logs -->
+            <div class="sidebar-section console-logs">
+              <h3>System Console</h3>
+              <div id="console-output" class="log-box">
+                <div class="log-line text-blue">System initialized. Ready to record.</div>
+              </div>
+            </div>
+
+          </aside>
+
+        </div>
+      </section>
+
+    </main>
+
+    <!-- Crash Recovery Overlay Panel -->
+    <div id="recovery-overlay" class="modal-overlay hidden">
+      <div class="modal-card glass-panel">
+        <i class="fa-solid fa-triangle-exclamation warning-icon"></i>
+        <h2>Unsaved Recording Detected!</h2>
+        <p>It looks like the browser closed unexpectedly during a previous recording session. We have successfully recovered the recording cache from your local disk database.</p>
+        <div class="modal-actions">
+          <button id="recover-download-btn" class="btn btn-primary">
+            <i class="fa-solid fa-file-arrow-down"></i> Recover & Save Track
+          </button>
+          <button id="recover-discard-btn" class="btn btn-secondary danger">
+            <i class="fa-solid fa-trash-can"></i> Discard Cache
+          </button>
+        </div>
+      </div>
+    </div>
+
+  </div>
+
+  <script src="app.js?v=2.0.0"></script>
+</body>
+</html>

@@ -1,7 +1,7 @@
 import React from 'react';
 import {
     Sparkles, Type, Languages, ArrowRight, Play,
-    Github, ChevronRight, ArrowDown, Youtube, Facebook, Film,
+    Github, ChevronRight, ArrowDown, Youtube, Facebook, Film, Mic,
 } from 'lucide-react';
 
 /**
@@ -241,6 +241,23 @@ export default function Home({ onChooseTab, currentUser }) {
                 outputsHeading: 'Dubbed into different languages',
             }),
         },
+        {
+            id: 'podcast',
+            tabId: 'podcast',
+            title: 'Podcast Studio',
+            tagline: 'Record high-quality remote video & audio interviews.',
+            description:
+                "Host virtual podcast sessions. Connect with your guest using an instant low-latency WebRTC link. Ensure 100% crash-proof recording by streaming high-fidelity audio/video directly to your local hard drive. Toggle background blur for messy rooms, and draw annotations live on shared screens.",
+            bullets: [
+                'Direct-to-Disk (File System Access) streams recordings directly to hard drive',
+                'IndexedDB backup cache guarantees zero lost recordings if a browser crashes',
+                'Annotation canvas overlays allow live screen share drawings and text overlays',
+            ],
+            cta: 'Open Podcast Studio',
+            icon: Mic,
+            accent: { ring: 'ring-pink-500/30', bg: 'from-pink-500/15 to-rose-500/5', text: 'text-pink-300', btn: 'bg-pink-500 hover:bg-pink-400 text-black' },
+            demo: false,
+        },
     ];
 
     return (
@@ -283,6 +300,12 @@ export default function Home({ onChooseTab, currentUser }) {
                             className="inline-flex items-center gap-2 px-5 py-3 rounded-xl border border-white/15 hover:bg-white/5 text-zinc-200 text-sm font-medium"
                         >
                             <Languages size={16} /> Voice Dubbing
+                        </button>
+                        <button
+                            onClick={() => onChooseTab?.('podcast')}
+                            className="inline-flex items-center gap-2 px-5 py-3 rounded-xl border border-white/15 hover:bg-white/5 text-zinc-200 text-sm font-medium"
+                        >
+                            <Mic size={16} /> Podcast Studio
                         </button>
                     </div>
                     <div className="mt-6 inline-flex items-center gap-1.5 text-[11px] text-zinc-500">

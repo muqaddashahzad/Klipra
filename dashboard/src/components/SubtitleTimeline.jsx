@@ -549,14 +549,12 @@ export default function SubtitleTimeline({
         next.push(...newSegs);
         next.sort((a, b) => (a.start || 0) - (b.start || 0));
         setSegments(next);
-        // Select the just-pasted segments by reference.
-        const pastedTextSet = new Set(newSegs.map((s) => `${s.start.toFixed(3)}|${s.text}`));
+        // Select the just-pasted segments by OBJECT IDENTITY. Keying on
+        // start|text wrongly also selected pre-existing segments with the same
+        // start/text, so a follow-up delete/drag hit unintended clips.
+        const pastedSet = new Set(newSegs);
         const newSelection = new Set();
-        next.forEach((s, i) => {
-            if (pastedTextSet.has(`${(s.start || 0).toFixed(3)}|${s.text}`)) {
-                newSelection.add(i);
-            }
-        });
+        next.forEach((s, i) => { if (pastedSet.has(s)) newSelection.add(i); });
         setSelectedIds(newSelection);
     }, [safeSegs, playheadT, duration, pushUndo, setSegments]);
 
@@ -582,13 +580,11 @@ export default function SubtitleTimeline({
         next.push(...newSegs);
         next.sort((a, b) => (a.start || 0) - (b.start || 0));
         setSegments(next);
-        const dupTextSet = new Set(newSegs.map((s) => `${s.start.toFixed(3)}|${s.text}`));
+        // Select duplicates by OBJECT IDENTITY (not start|text, which also
+        // matched the originals they were copied from).
+        const dupSet = new Set(newSegs);
         const newSelection = new Set();
-        next.forEach((s, i) => {
-            if (dupTextSet.has(`${(s.start || 0).toFixed(3)}|${s.text}`)) {
-                newSelection.add(i);
-            }
-        });
+        next.forEach((s, i) => { if (dupSet.has(s)) newSelection.add(i); });
         setSelectedIds(newSelection);
     }, [safeSegs, selectedIds, selectedIdx, duration, pushUndo, setSegments]);
 

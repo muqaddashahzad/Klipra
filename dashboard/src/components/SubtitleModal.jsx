@@ -1,7 +1,9 @@
 import React, { useState, useEffect } from 'react';
-import { X, Type, Loader2, RotateCcw, Lightbulb } from 'lucide-react';
-import { getApiUrl } from '../config';
+import { X, Type, Loader2, RotateCcw, Lightbulb, Copy } from 'lucide-react';
+import { getApiUrl, buildLlmHeaders } from '../config';
 import RemotionPreview from './RemotionPreview';
+import ProviderPicker from './ProviderPicker';
+import { Sparkles } from 'lucide-react';
 
 const FONT_OPTIONS = [
     { value: 'Verdana', label: 'Verdana' },
@@ -73,6 +75,60 @@ export default function SubtitleModal({ isOpen, onClose, onGenerate, isProcessin
     const [regenTargetLang, setRegenTargetLang] = useState('en');
     // After phase 1, the user can edit the cleaned text inline before burning.
     const [regenEditedText, setRegenEditedText] = useState('');
+    // Brief "Copied!" confirmation for the "Copy for external AI" button.
+    const [extCopied, setExtCopied] = useState(false);
+
+    // Build a self-contained Urglish prompt + transcript so the user can do
+    // the AI cleanup in an external tool (aistudio.google.com, Gemini app,
+    // ChatGPT, etc.) when the in-app subscription cookies are flaky, then
+    // paste the result back into the editor below.
+    const buildExternalAiPrompt = () => {
+        // Prefer one-line-per-segment (clean mapping); fall back to the
+        // current editable text.
+        const segs = regenResult?.segments || [];
+        const lines = segs.length
+            ? segs.map(s => (s.text || '').trim()).filter(Boolean)
+            : (regenEditedText || '').split('\n').map(l => l.trim()).filter(Boolean);
+        const transcript = lines.join('\n');
+        return (
+`You are an expert "Urglish" (Roman Urdu + English) writer. Below is a Whisper transcript of Urdu speech that frequently code-switches into English.
+
+YOUR JOB — rewrite every line as clean, readable Urglish:
+- Urdu words -> Roman/Latin transliteration the way a Pakistani native types on an English keyboard (e.g. "ہے" -> "hai", "کیا" -> "kya", "نہیں" -> "nahi").
+- English words AND phrases -> KEEP THEM IN ENGLISH, verbatim. Do NOT phoneticise English. "community" stays "community" (not "komyuniti"), "Bitcoin" stays "Bitcoin", "crypto" stays "crypto", "market" stays "market".
+- Proper nouns (people, brands, places, projects) -> use the correct/canonical English spelling (e.g. Reuters, Trump, Ethereum, Binance).
+- Numbers -> digits (e.g. "2.3 million", "$50").
+- Keep the SAME number of lines, in the SAME order. Do NOT merge, split, add, drop, or renumber lines. No commentary, no quotes, no bullet points.
+
+Return ONLY the rewritten lines — one line per input line, in order.
+
+TRANSCRIPT (${lines.length} lines):
+${transcript}`
+        );
+    };
+
+    const copyExternalAiPrompt = async () => {
+        try {
+            await navigator.clipboard.writeText(buildExternalAiPrompt());
+            setExtCopied(true);
+            setTimeout(() => setExtCopied(false), 2500);
+        } catch (e) {
+            // Clipboard API can fail on http origins / permissions — fall back
+            // to a temporary textarea select+copy.
+            try {
+                const ta = document.createElement('textarea');
+                ta.value = buildExternalAiPrompt();
+                ta.style.position = 'fixed'; ta.style.opacity = '0';
+                document.body.appendChild(ta); ta.select();
+                document.execCommand('copy');
+                document.body.removeChild(ta);
+                setExtCopied(true);
+                setTimeout(() => setExtCopied(false), 2500);
+            } catch (_) {
+                alert('Could not copy automatically. Select the transcript text and copy it manually.');
+            }
+        }
+    };
     // Phase-3 Sync state: tracks whether the synced timing has been
     // computed and saved on the server (true after a successful Sync run).
     const [syncStatus, setSyncStatus] = useState(null); // null | 'syncing' | 'done' | 'error'
@@ -181,8 +237,18 @@ export default function SubtitleModal({ isOpen, onClose, onGenerate, isProcessin
     // Phase-1 of two-phase Regenerate. Re-transcribes JUST this clip's
     // audio + optional AI cleanup, then lets the user proofread before
     // burning. Burn happens via the standard onGenerate path.
-    const runRegenerate = async () => {
-        setRegenStatus(regenCleanupMode === 'auto' ? 'transcribing' : 'cleaning');
+    // Accepts explicit mode/lang overrides so the "Re-run Step 1 in X" button
+    // can pass the freshly-picked language DIRECTLY, instead of relying on a
+    // setTimeout + state-closure dance (which could fire with a stale mode and
+    // make the re-run appear to "do nothing" / keep the previous language).
+    const runRegenerate = async (modeOverride, langOverride) => {
+        // Type-guard: if called directly as an onClick handler the first arg
+        // is a DOM/synthetic event, not a mode string. Only accept real string
+        // overrides — otherwise an event object would leak into JSON.stringify
+        // and throw "Converting circular structure to JSON".
+        const mode = (typeof modeOverride === 'string') ? modeOverride : regenCleanupMode;
+        const lang = (typeof langOverride === 'string') ? langOverride : regenTargetLang;
+        setRegenStatus(mode === 'auto' ? 'transcribing' : 'cleaning');
         setRegenError(null);
         setRegenResult(null);
         try {
@@ -190,14 +256,23 @@ export default function SubtitleModal({ isOpen, onClose, onGenerate, isProcessin
                 method: 'POST',
                 headers: {
                     'Content-Type': 'application/json',
-                    ...(llmHeaders || {}),
+                    // Read the LIVE provider from localStorage at request time,
+                    // not the stale llmHeaders prop. The in-app provider picker
+                    // persists there but doesn't re-render this modal, so the
+                    // prop could still say Gemini after the user switched to
+                    // Ollama — which 429'd (Gemini free quota) and surfaced as
+                    // a generic "Internal Server Error".
+                    ...buildLlmHeaders(llmHeaders),
+                    // Force-bypass any HTTP cache so a repeat re-run always
+                    // hits the backend fresh.
+                    'Cache-Control': 'no-cache',
                 },
                 body: JSON.stringify({
                     job_id: jobId,
                     clip_index: clipIndex,
                     input_filename: currentVideoFilename || null,
-                    cleanup_mode: regenCleanupMode,
-                    target_language: regenCleanupMode === 'translate' ? regenTargetLang : null,
+                    cleanup_mode: mode,
+                    target_language: mode === 'translate' ? lang : null,
                 }),
             });
             if (!res.ok) {
@@ -311,7 +386,13 @@ export default function SubtitleModal({ isOpen, onClose, onGenerate, isProcessin
                 method: 'POST',
                 headers: {
                     'Content-Type': 'application/json',
-                    ...(llmHeaders || {}),
+                    // Read the LIVE provider from localStorage at request time,
+                    // not the stale llmHeaders prop. The in-app provider picker
+                    // persists there but doesn't re-render this modal, so the
+                    // prop could still say Gemini after the user switched to
+                    // Ollama — which 429'd (Gemini free quota) and surfaced as
+                    // a generic "Internal Server Error".
+                    ...buildLlmHeaders(llmHeaders),
                 },
                 body: JSON.stringify({
                     job_id: jobId,
@@ -353,7 +434,13 @@ export default function SubtitleModal({ isOpen, onClose, onGenerate, isProcessin
                 method: 'POST',
                 headers: {
                     'Content-Type': 'application/json',
-                    ...(llmHeaders || {}),
+                    // Read the LIVE provider from localStorage at request time,
+                    // not the stale llmHeaders prop. The in-app provider picker
+                    // persists there but doesn't re-render this modal, so the
+                    // prop could still say Gemini after the user switched to
+                    // Ollama — which 429'd (Gemini free quota) and surfaced as
+                    // a generic "Internal Server Error".
+                    ...buildLlmHeaders(llmHeaders),
                 },
                 body: JSON.stringify({
                     job_id: jobId,
@@ -430,12 +517,19 @@ export default function SubtitleModal({ isOpen, onClose, onGenerate, isProcessin
     // — the same reference the backend uses (subtitles.burn_subtitles
     // PREVIEW_REFERENCE_HEIGHT=600). To make the Remotion preview show
     // the same proportional size as the burn, multiply by
-    // (canvas_height / 600). Remotion's preview canvas is rendered at
-    // 1080-tall vertical (the standard short-form output size), so
-    // 1080/600 = 1.8 keeps preview = burn. The legacy 2.2 multiplier
-    // produced a preview that was ~22% larger than the burn —
-    // contributed to the user-visible "font changes after burn" bug.
-    const PREVIEW_FONT_SCALE = 1.8;
+    // (canvas_HEIGHT / 600).
+    //
+    // BUGFIX: the Remotion composition is 1080×1920 — i.e. 1080 WIDE and
+    // 1920 TALL (RemotionPreview.jsx compositionWidth=1080, compositionHeight
+    // =1920). The previous value 1.8 = 1080/600 mistakenly used the WIDTH as
+    // the height, so the preview font was only 1.8/3.2 ≈ 0.56× of the burn —
+    // i.e. the BURN came out ~1.78× LARGER than the preview (the user's
+    // "font is bigger after burning" bug). The correct scale is the canvas
+    // HEIGHT over the reference: 1920/600 = 3.2, which is exactly the
+    // video_h/600 factor burn_subtitles() applies, so preview == burn.
+    const REMOTION_CANVAS_HEIGHT = 1920;
+    const PREVIEW_REFERENCE_HEIGHT = 600;
+    const PREVIEW_FONT_SCALE = REMOTION_CANVAS_HEIGHT / PREVIEW_REFERENCE_HEIGHT; // 3.2
     const subtitleConfig = {
         captions,
         position,
@@ -783,6 +877,29 @@ export default function SubtitleModal({ isOpen, onClose, onGenerate, isProcessin
                             </div>
                         )}
 
+                        {/* AI MODEL — the Roman / Translate / Regenerate steps
+                            call an LLM. Without a picker here the modal used
+                            whatever provider was saved globally (often Gemini,
+                            whose free tier is 20 req/day) and there was no way
+                            to switch — so a quota error left the user stuck.
+                            ProviderPicker persists to the same localStorage key
+                            buildLlmHeaders() reads at request time, so changing
+                            it here takes effect immediately. Pick Ollama for a
+                            free, local, no-quota provider. */}
+                        <div className="rounded-lg border border-white/10 bg-surface/40 p-3">
+                            <div className="flex items-center justify-between gap-3 flex-wrap">
+                                <div className="text-[11px] uppercase tracking-wider text-zinc-500 font-bold flex items-center gap-1.5">
+                                    <Sparkles size={11} className="text-primary" /> AI model
+                                </div>
+                                <div className="flex-1 min-w-[200px] flex justify-end">
+                                    <ProviderPicker />
+                                </div>
+                            </div>
+                            <p className="text-[10px] text-zinc-500 mt-2 leading-snug">
+                                Used by Roman / Translate / Regenerate. Pick <strong className="text-zinc-300">Ollama</strong> (free, local, no quota) if Gemini hits its daily limit.
+                            </p>
+                        </div>
+
                         {/* Subtitle script — original / roman / translate / regenerate.
                             Two rows on small viewports, one row on wider. */}
                         <div className="rounded-lg border border-white/10 bg-black/30 p-3 space-y-2.5">
@@ -948,7 +1065,7 @@ export default function SubtitleModal({ isOpen, onClose, onGenerate, isProcessin
                                             )}
                                             <button
                                                 type="button"
-                                                onClick={runRegenerate}
+                                                onClick={() => runRegenerate()}
                                                 disabled={regenStatus === 'transcribing' || regenStatus === 'cleaning'}
                                                 className="w-full py-2 rounded-md bg-primary hover:bg-blue-600 text-white text-xs font-bold flex items-center justify-center gap-2"
                                             >
@@ -1059,13 +1176,11 @@ export default function SubtitleModal({ isOpen, onClose, onGenerate, isProcessin
                                                 <button
                                                     type="button"
                                                     onClick={() => {
-                                                        // Clear current proofread state first so
-                                                        // the user sees a clean run.
-                                                        setRegenResult(null);
                                                         setRegenEditedText('');
-                                                        setRegenStatus(null);
-                                                        // Trigger the re-run after state settles.
-                                                        setTimeout(() => runRegenerate(), 0);
+                                                        // Call DIRECTLY with the picked mode/lang
+                                                        // so it never fires with a stale value —
+                                                        // runRegenerate clears regenResult itself.
+                                                        runRegenerate(regenCleanupMode, regenTargetLang);
                                                     }}
                                                     className="w-full py-1.5 rounded bg-primary/80 hover:bg-primary text-white text-[11px] font-bold flex items-center justify-center gap-1.5"
                                                 >
@@ -1079,6 +1194,30 @@ export default function SubtitleModal({ isOpen, onClose, onGenerate, isProcessin
                                                 </button>
                                             </div>
 
+                                            {/* External-AI workaround: copy transcript + a full
+                                                Urglish prompt, do the cleanup in aistudio.google.com /
+                                                Gemini / ChatGPT, then paste the result back below.
+                                                Useful when the in-app subscription cookies are flaky. */}
+                                            <div className="rounded border border-cyan-500/20 bg-cyan-500/5 p-2.5 space-y-1.5">
+                                                <div className="text-[10px] text-cyan-200/90 leading-snug">
+                                                    <strong>Do the cleanup in an external AI</strong> (Google AI Studio, Gemini, or ChatGPT) and paste the result back below. The copy includes a ready-made Urglish prompt (Roman Urdu + English words kept in English).
+                                                </div>
+                                                <button
+                                                    type="button"
+                                                    onClick={copyExternalAiPrompt}
+                                                    className={
+                                                        'w-full py-1.5 rounded text-[11px] font-bold flex items-center justify-center gap-1.5 transition ' +
+                                                        (extCopied
+                                                            ? 'bg-green-500/20 text-green-200 border border-green-400/40'
+                                                            : 'bg-cyan-500/15 hover:bg-cyan-500/25 text-cyan-100 border border-cyan-400/30')
+                                                    }
+                                                >
+                                                    {extCopied
+                                                        ? <>✓ Copied — paste into aistudio.google.com, then paste the result below</>
+                                                        : <><Copy size={11} /> Copy transcript + Urglish prompt for external AI</>}
+                                                </button>
+                                            </div>
+
                                             <textarea
                                                 value={regenEditedText}
                                                 onChange={(e) => handleRegenTextEdit(e.target.value)}
@@ -1086,7 +1225,7 @@ export default function SubtitleModal({ isOpen, onClose, onGenerate, isProcessin
                                                 className="w-full bg-black/40 border border-white/10 rounded-md p-2 text-[12px] text-white focus:outline-none focus:border-green-500/50 resize-y leading-relaxed"
                                             />
                                             <p className="text-[10px] text-zinc-500 leading-relaxed">
-                                                Edit the text above if you want. After editing, run <strong>Step 3 (Sync)</strong>
+                                                Edit the text above (or paste your external-AI result here). After editing, run <strong>Step 3 (Sync)</strong>
                                                 so the burned subtitles line up with the spoken audio.
                                             </p>
                                         </div>

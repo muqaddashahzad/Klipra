@@ -298,19 +298,32 @@ export default function HorizontalToVertical({
                 next.push(c);
                 continue;
             }
-            // Find the range containing playheadT.
-            const trIdx = c.time_ranges.findIndex(r => r.start < playheadT && playheadT < r.end);
-            if (trIdx < 0) {
+            // Partition EVERY range at the playhead — not just the one that
+            // happens to contain it. A range wholly before the playhead goes
+            // to part 1; wholly after goes to part 2; a range that straddles
+            // the playhead is cut into a [start, playhead] piece for part 1
+            // and a [playhead, end] piece for part 2. This also splits
+            // correctly when the playhead sits in a GAP between two ranges
+            // (the old code bailed out in that case and did nothing).
+            const aRanges = [];
+            const bRanges = [];
+            for (const x of c.time_ranges) {
+                if (x.end <= playheadT) {
+                    aRanges.push({ ...x });
+                } else if (x.start >= playheadT) {
+                    bRanges.push({ ...x });
+                } else {
+                    aRanges.push({ ...x, end: playheadT });
+                    bRanges.push({ ...x, start: playheadT });
+                }
+            }
+            // Only a real split if there's content on both sides.
+            if (!aRanges.length || !bRanges.length) {
                 next.push(c);
                 continue;
             }
-            const r = c.time_ranges[trIdx];
-            const a = { ...c, id: `${c.id}_a${Date.now()}`, title: c.title + ' (part 1)',
-                       time_ranges: [...c.time_ranges.slice(0, trIdx), { start: r.start, end: playheadT },
-                                     ...c.time_ranges.slice(trIdx + 1).filter(x => x.end <= playheadT)] };
-            const b = { ...c, id: `${c.id}_b${Date.now()}`, title: c.title + ' (part 2)',
-                       time_ranges: [{ start: playheadT, end: r.end },
-                                     ...c.time_ranges.slice(trIdx + 1).filter(x => x.start >= playheadT)] };
+            const a = { ...c, id: `${c.id}_a${Date.now()}`, title: c.title + ' (part 1)', time_ranges: aRanges };
+            const b = { ...c, id: `${c.id}_b${Date.now()}`, title: c.title + ' (part 2)', time_ranges: bRanges };
             next.push(a, b);
             didSplit = true;
         }

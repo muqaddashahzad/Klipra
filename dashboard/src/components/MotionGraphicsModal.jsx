@@ -760,7 +760,7 @@ export default function MotionGraphicsModal({
                                             ? `Pasted (${transcript.length} chars)`
                                             : 'Paste manually — empty')}
                                         {transcriptMode === 'auto' && (transcript
-                                            ? `Auto-generated (${transcriptSource || 'ready'})`
+                                            ? 'Auto-generated (ready)'
                                             : 'Auto-generate when you click Apply Magic')}
                                     </div>
                                 </div>

@@ -70,6 +70,14 @@ export default function SaaShortsTab({ geminiApiKey, elevenLabsKey, falKey, uplo
   const [actorGallery, setActorGallery] = useState([]);
   const [loadingGallery, setLoadingGallery] = useState(false);
   const [uploadedActorPreview, setUploadedActorPreview] = useState(null); // {localPreview, serverUrl}
+  // Revoke the actor-photo blob URL when it's replaced by a new upload or
+  // the component unmounts — createObjectURL pins the file in the blob
+  // registry until explicitly revoked (every other uploader in the app
+  // already does this; this one was the exception).
+  useEffect(() => {
+    const url = uploadedActorPreview?.localPreview;
+    return () => { if (url) URL.revokeObjectURL(url); };
+  }, [uploadedActorPreview?.localPreview]);
   const [productPhoto, setProductPhoto] = useState(null); // {preview, serverUrl}
   const [productDescription, setProductDescription] = useState('');
 
@@ -125,13 +133,18 @@ export default function SaaShortsTab({ geminiApiKey, elevenLabsKey, falKey, uplo
       'es-male': 'ErXwobaYiN019PkySvjV',     // Antoni
     };
     // If we have fetched voices, pick the first matching one; otherwise use hardcoded default
-    const matchingVoice = voices.find(v => (v.labels?.gender || '').toLowerCase() === actorGender);
-    if (matchingVoice) {
-      setSelectedVoice(matchingVoice.voice_id);
-    } else {
-      setSelectedVoice(genderDefaults[`${language}-${actorGender}`] || genderDefaults['en-female']);
-    }
-  }, [actorGender, language]);
+    // If the user's CURRENT pick is still valid for this gender, keep it —
+    // don't clobber their choice on an unrelated language toggle. Only reset
+    // when the current selection no longer matches. `voices` in the deps so
+    // this re-runs (and picks a real voice) once voices finish loading.
+    const filtered = voices.filter(v => (v.labels?.gender || '').toLowerCase() === actorGender);
+    if (filtered.some(v => v.voice_id === selectedVoice)) return;
+    setSelectedVoice(
+      filtered[0]?.voice_id
+      || genderDefaults[`${language}-${actorGender}`]
+      || genderDefaults['en-female']
+    );
+  }, [actorGender, language, voices]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Poll generation status
   useEffect(() => {

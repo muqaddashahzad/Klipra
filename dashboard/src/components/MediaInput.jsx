@@ -32,7 +32,7 @@ const SOURCE_LANGS = [
     ['pa', 'Punjabi'],
 ];
 
-export default function MediaInput({ onProcess, isProcessing }) {
+export default function MediaInput({ onProcess, isProcessing, provider }) {
     const [mode, setMode] = useState('url'); // 'url' | 'file' | 'local'
     const [url, setUrl] = useState('');
     const [file, setFile] = useState(null);
@@ -148,6 +148,28 @@ export default function MediaInput({ onProcess, isProcessing }) {
     const [transcribeProvider, setTranscribeProvider] = useState(
         () => localStorage.getItem('os_transcribe_provider') || 'whisper'
     );
+    // Pause-for-manual-cleanup: after transcription, stop and let the user
+    // clean the transcript in an external AI (aistudio.google.com), then
+    // proceed. Defaults ON ONLY when the selected AI provider is
+    // gemini-subscription (whose cookie auth is flaky for long runs);
+    // optional + default OFF for every other provider (Ollama, Gemini API
+    // key, OpenAI, …). The live provider is passed in as a prop so this
+    // re-evaluates whenever the user switches models in the picker.
+    const _liveProvider = () => {
+        if (provider) return provider;
+        try { return JSON.parse(localStorage.getItem('os_llm_pref_last') || '{}')?.provider; }
+        catch { return undefined; }
+    };
+    const [pauseForCleanup, setPauseForCleanup] = useState(() => _liveProvider() === 'gemini-subscription');
+    // Track whether the user manually toggled the checkbox. Until they do, we
+    // keep the default in sync with the selected provider (ON for the
+    // subscription, OFF otherwise) — that's the bug fix: previously the value
+    // was frozen at mount, so switching from the default gemini-subscription
+    // to a Gemini API key still paused. Once the user touches it, respect them.
+    const [pauseTouched, setPauseTouched] = useState(false);
+    React.useEffect(() => {
+        if (!pauseTouched) setPauseForCleanup((provider || _liveProvider()) === 'gemini-subscription');
+    }, [provider, pauseTouched]); // eslint-disable-line react-hooks/exhaustive-deps
 
     React.useEffect(() => {
         localStorage.setItem('os_min_clips', String(minClips));
@@ -162,6 +184,7 @@ export default function MediaInput({ onProcess, isProcessing }) {
     const clipOptions = {
         minClips, maxClips, minDur, maxDur,
         transcriptLang, transcriptScript, transcribeProvider,
+        pauseForCleanup,
     };
 
     const handleSubmit = (e) => {
@@ -537,6 +560,26 @@ export default function MediaInput({ onProcess, isProcessing }) {
                                         detected language is already Latin script.
                                     </p>
                                 )}
+
+                                {/* Pause for manual transcript cleanup (external AI) */}
+                                <label className="mt-3 flex items-start gap-2.5 cursor-pointer select-none">
+                                    <input
+                                        type="checkbox"
+                                        checked={pauseForCleanup}
+                                        onChange={(e) => { setPauseTouched(true); setPauseForCleanup(e.target.checked); }}
+                                        className="mt-0.5 h-4 w-4 accent-cyan-400 cursor-pointer"
+                                    />
+                                    <span className="flex-1">
+                                        <span className="text-xs font-medium text-zinc-200">
+                                            Pause for manual transcript cleanup
+                                        </span>
+                                        <span className="block text-[10px] text-zinc-500 leading-snug mt-0.5">
+                                            After transcription, stop and let you clean the transcript in an
+                                            external AI (Google AI Studio / Gemini), then paste it back and
+                                            continue. Recommended when using the Gemini Subscription model.
+                                        </span>
+                                    </span>
+                                </label>
                             </div>
 
                             {/* --- Clip selection --- */}
@@ -551,7 +594,7 @@ export default function MediaInput({ onProcess, isProcessing }) {
                                                onChange={(v) => { setMaxClips(v); if (v < minClips) setMinClips(v); }} />
                                     <SliderRow label="Min duration" value={minDur} min={5} max={120} unit="s"
                                                onChange={(v) => { setMinDur(v); if (v > maxDur) setMaxDur(v); }} />
-                                    <SliderRow label="Max duration" value={maxDur} min={10} max={180} unit="s"
+                                    <SliderRow label="Max duration" value={maxDur} min={10} max={300} unit="s"
                                                onChange={(v) => { setMaxDur(v); if (v < minDur) setMinDur(v); }} />
                                 </div>
                             </div>

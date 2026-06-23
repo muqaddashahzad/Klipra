@@ -2,22 +2,23 @@ import React, { useState, useRef, useEffect, useMemo, useCallback } from 'react'
 import {
     Upload, Type, Loader2, Download, RotateCcw, Lightbulb, Check,
     ChevronRight, ChevronLeft, AlertCircle, Wand2, Palette, RefreshCw, Volume2,
-    Plus, Trash2, Copy,
+    Plus, Trash2, Copy, Sparkles, ArrowRight,
     // Used by the Phase 1 "Frame & crop" card. Adding the icon was the
     // missing piece that crashed the screen after that feature shipped
     // — `Languages` was referenced in JSX but never imported, so React
     // failed on render with `Languages is not defined`.
     Languages,
 } from 'lucide-react';
-import { getApiUrl } from '../config';
+import { getApiUrl, buildLlmHeaders } from '../config';
 import StandalonePastList from './StandalonePastList';
 import ProcessingPreview from './ProcessingPreview';
 import SubtitleTemplatesPicker from './SubtitleTemplatesPicker';
 import StandaloneReframeKeyframeModal from './StandaloneReframeKeyframeModal';
 import ProviderPicker from './ProviderPicker';
+import HookModal from './HookModal';
 import SubtitleTimeline from './SubtitleTimeline';
 import { limitSubtitleLines } from '../utils/subtitleLines';
-import { resolvePreviewFontFamily, computeSafeShrinkRatio, longestWrappedLineChars } from '../utils/fontFallbacks';
+import { resolvePreviewFontFamily, computeSafeShrinkRatio, longestSegmentChars } from '../utils/fontFallbacks';
 
 // Named pipeline stages for the Subtitle wizard. Each entry maps to a
 // status the backend emits — ProcessingPreview highlights the active
@@ -173,6 +174,13 @@ export default function StandaloneSubtitle({ llmHeaders, elevenLabsKey, homeBump
     // and Word-Highlight; ignored for Pop/Glow/None.
     const [animation, setAnimation] = useState('none');
     const [highlightColor, setHighlightColor] = useState('#FFDD00');
+    // VIDEO HOOK — optional punchy text overlay burned on top of the
+    // finished video (same model as the clip tool's viral hook). null =
+    // no hook. Shape: {text, position, size, text_color, bg_color,
+    // bg_opacity, y_offset}. Edited via the shared <HookModal/> and
+    // applied server-side after the subtitle burn.
+    const [hookConfig, setHookConfig] = useState(null);
+    const [showHookModal, setShowHookModal] = useState(false);
     // Phase 2 styling: choose whether template clicks restyle ALL
     // subtitles or just the one currently selected on the timeline.
     // 'all' is the classic behaviour and is what the burn honours;
@@ -434,7 +442,11 @@ export default function StandaloneSubtitle({ llmHeaders, elevenLabsKey, homeBump
                     setError(last || (data.logs && data.logs[data.logs.length - 1]) || 'Pipeline failed without an error message — check Docker logs.');
                 }
                 if (data.result) {
-                    if (data.result.phase === 1 && data.result.transcript_text) {
+                    // Only (re)apply the phase-1 transcript at the transcript_ready
+                    // transition. Without the status gate, the 2s poll kept
+                    // re-applying the STALE old-language result during a
+                    // regenerate/retranslate, flashing the previous text back.
+                    if (data.status === 'transcript_ready' && data.result.phase === 1 && data.result.transcript_text) {
                         setTranscriptText(data.result.transcript_text);
                         setEditedTranscript(data.result.transcript_text);
                         if (Array.isArray(data.result.segments)) {
@@ -445,6 +457,10 @@ export default function StandaloneSubtitle({ llmHeaders, elevenLabsKey, homeBump
                         if (data.status === 'transcript_ready') {
                             setRefineStatus(data.result.synced ? 'synced' : 'idle');
                         }
+                        // Surface a transliteration no-op warning (transcript was
+                        // already English, nothing to romanize) so the user knows
+                        // to re-transcribe with Urdu as the source language.
+                        if (data.result.warning) setRefineError(data.result.warning);
                     }
                     if (data.result.phase === 2 && data.result.video_url) {
                         setFinalVideoUrl(data.result.video_url);
@@ -468,7 +484,13 @@ export default function StandaloneSubtitle({ llmHeaders, elevenLabsKey, homeBump
                 method: 'POST',
                 headers: {
                     'Content-Type': 'application/json',
-                    ...(llmHeaders || {}),
+                    // Read the LIVE provider choice from localStorage at
+                    // request time (not the stale prop). The in-page
+                    // ProviderPicker persists there but doesn't re-render
+                    // App.jsx, so the `llmHeaders` prop can lag behind the
+                    // picker — which sent requests to Gemini even after the
+                    // user switched to Ollama (→ 429 quota error).
+                    ...buildLlmHeaders(llmHeaders),
                 },
                 body: JSON.stringify({ job_id: jobId }),
             });
@@ -526,7 +548,13 @@ export default function StandaloneSubtitle({ llmHeaders, elevenLabsKey, homeBump
                 method: 'POST',
                 headers: {
                     'Content-Type': 'application/json',
-                    ...(llmHeaders || {}),
+                    // Read the LIVE provider choice from localStorage at
+                    // request time (not the stale prop). The in-page
+                    // ProviderPicker persists there but doesn't re-render
+                    // App.jsx, so the `llmHeaders` prop can lag behind the
+                    // picker — which sent requests to Gemini even after the
+                    // user switched to Ollama (→ 429 quota error).
+                    ...buildLlmHeaders(llmHeaders),
                 },
                 body: JSON.stringify({
                     job_id: jobId,
@@ -539,9 +567,14 @@ export default function StandaloneSubtitle({ llmHeaders, elevenLabsKey, homeBump
             // 'cleaning' to 'transcript_ready' when the new translation
             // arrives, and the user lands on the editor automatically.
         } catch (e) {
+            // Return to the transcript-ready editor (which shows the source
+            // video + surfaces refineError) instead of 'completed' —
+            // 'completed' with a null finalVideoUrl matches NO render branch
+            // and leaves a blank screen.
+            setRefineError('Could not re-create: ' + (e.message || String(e)));
             setError('Could not re-create: ' + (e.message || String(e)));
             setRefineStatus('idle');
-            setStatus('completed');
+            setStatus('transcript_ready');
         }
     };
 
@@ -941,7 +974,13 @@ export default function StandaloneSubtitle({ llmHeaders, elevenLabsKey, homeBump
             const res = await fetch(getApiUrl('/api/standalone/subtitle/transcribe'), {
                 method: 'POST',
                 headers: {
-                    ...(llmHeaders || {}),
+                    // Read the LIVE provider choice from localStorage at
+                    // request time (not the stale prop). The in-page
+                    // ProviderPicker persists there but doesn't re-render
+                    // App.jsx, so the `llmHeaders` prop can lag behind the
+                    // picker — which sent requests to Gemini even after the
+                    // user switched to Ollama (→ 429 quota error).
+                    ...buildLlmHeaders(llmHeaders),
                     ...(elevenLabsKey ? { 'X-ElevenLabs-Key': elevenLabsKey } : {}),
                 },
                 body: fd,
@@ -1087,9 +1126,45 @@ export default function StandaloneSubtitle({ llmHeaders, elevenLabsKey, homeBump
                 // honors these. 'none' falls back to the static path.
                 animation: animation,
                 highlight_color: highlightColor,
+                // VIDEO HOOK — optional punchy overlay burned on top of the
+                // finished video (applied server-side after the subtitle
+                // burn). Empty when the user didn't add one.
+                hook_text: hookConfig?.text || '',
+                hook_position: hookConfig?.position || 'top',
+                hook_size: hookConfig?.size || 'M',
+                hook_text_color: hookConfig?.text_color || '#000000',
+                hook_bg_color: hookConfig?.bg_color || '#FFFFFF',
+                hook_bg_opacity: typeof hookConfig?.bg_opacity === 'number' ? hookConfig.bg_opacity : 0.94,
+                hook_y_offset: typeof hookConfig?.y_offset === 'number' ? hookConfig.y_offset : null,
+                // 2-D hook placement (corner anchor + px margins).
+                hook_h_align: hookConfig?.h_align || 'center',
+                hook_v_align: hookConfig?.v_align || null,
+                hook_margin_x: typeof hookConfig?.margin_x === 'number' ? hookConfig.margin_x : 40,
+                hook_margin_y: typeof hookConfig?.margin_y === 'number' ? hookConfig.margin_y : 40,
                 // Manual time-shift slider — backend clamps to ±60 s.
                 // 0 = no shift (default).
                 time_offset_seconds: timeOffsetSeconds || 0,
+                // IMAGE OVERLAYS — logos / stickers / cutouts the user
+                // dropped onto the preview. Each carries its base64 data
+                // URL plus position (xPct/yPct = CENTRE, 0..100), size
+                // (widthPct of frame width) and the time window it's
+                // visible. Backend decodes each to a temp PNG and
+                // composites it with ffmpeg `overlay ... enable='between'`
+                // so the burned mp4 matches the live preview. Omitted when
+                // the user added none. data: URLs can be large, so only the
+                // fields the burn needs are sent (not the UI-only `name`).
+                image_overlays: (Array.isArray(imageOverlays) && imageOverlays.length)
+                    ? imageOverlays
+                        .filter((ov) => ov && typeof ov.dataUrl === 'string' && ov.dataUrl.startsWith('data:image/'))
+                        .map((ov) => ({
+                            data_url: ov.dataUrl,
+                            start: +ov.start || 0,
+                            end: +ov.end || 0,
+                            x_pct: typeof ov.xPct === 'number' ? ov.xPct : 50,
+                            y_pct: typeof ov.yPct === 'number' ? ov.yPct : 50,
+                            width_pct: typeof ov.widthPct === 'number' ? ov.widthPct : 30,
+                        }))
+                    : null,
             };
             // VERY VISIBLE PROOF that the new burn payload code is the
             // one running. If you click Burn and DON'T see this banner
@@ -1440,6 +1515,8 @@ export default function StandaloneSubtitle({ llmHeaders, elevenLabsKey, homeBump
                         bgOpacity={bgOpacity} setBgOpacity={setBgOpacity}
                         animation={animation} setAnimation={setAnimation}
                         highlightColor={highlightColor} setHighlightColor={setHighlightColor}
+                        hookConfig={hookConfig} setHookConfig={setHookConfig}
+                        showHookModal={showHookModal} setShowHookModal={setShowHookModal}
                         applyScope={applyScope} setApplyScope={setApplyScope}
                         fallbackSample={(editedTranscript || transcriptText).split(/\s+/).slice(0, 8).join(' ') || 'Your subtitles look like this'}
                         error={error}
@@ -1575,7 +1652,7 @@ export default function StandaloneSubtitle({ llmHeaders, elevenLabsKey, homeBump
                                     try {
                                         const r = await fetch(getApiUrl(`/api/standalone/${jobId}/resume`), {
                                             method: 'POST',
-                                            headers: { 'Content-Type': 'application/json', ...(llmHeaders || {}) },
+                                            headers: { 'Content-Type': 'application/json', ...buildLlmHeaders(llmHeaders) },
                                         });
                                         if (r.ok) {
                                             setStatus('cleaning');
@@ -2318,6 +2395,61 @@ function Phase1Preview(p) {
         }
     };
 
+    // ─── Apply Plain → Timed ──────────────────────────────────────────────
+    // The Plain textarea edits a flat string (editedTranscript); the Timed
+    // track is the segments[] array, and ONLY the timed track is burned. So a
+    // user who pastes a cleaned/translated transcript into Plain saw it vanish
+    // at burn time. This pushes the Plain text onto the timed segments while
+    // keeping every segment's original start/end:
+    //   • If the pasted text has exactly one non-empty line per segment, map
+    //     line→segment 1:1 (perfect — timing untouched).
+    //   • Otherwise spread the words across segments proportionally to each
+    //     segment's duration (mirrors the backend's edited_text behaviour).
+    const [plainApplied, setPlainApplied] = useState(false);
+    const applyPlainToTimed = () => {
+        const base = p.segments || [];
+        if (!base.length) return;
+        const raw = (p.editedTranscript || '').replace(/\r/g, '');
+        const retime = (seg, text) => {
+            const start = +seg.start || 0;
+            const end = +seg.end || start;
+            const toks = (text || '').split(/\s+/).filter(Boolean);
+            const per = (toks.length && end > start) ? (end - start) / toks.length : 0;
+            return {
+                ...seg,
+                text: (text || '').trim(),
+                words: toks.map((w, k) => ({ word: w, start: start + k * per, end: start + (k + 1) * per })),
+            };
+        };
+        const lines = raw.split('\n').map((l) => l.trim()).filter(Boolean);
+        let next;
+        if (lines.length === base.length) {
+            next = base.map((seg, i) => retime(seg, lines[i]));
+        } else {
+            const words = raw.split(/\s+/).filter(Boolean);
+            const totalDur = base.reduce(
+                (sum, s) => sum + Math.max(0, (+s.end || 0) - (+s.start || 0)), 0) || 1;
+            let cursor = 0;
+            next = base.map((seg, i) => {
+                let take;
+                if (i === base.length - 1) {
+                    take = words.length - cursor;
+                } else {
+                    const dur = Math.max(0, (+seg.end || 0) - (+seg.start || 0));
+                    take = Math.max(1, Math.round(words.length * (dur / totalDur)));
+                    take = Math.min(take, words.length - cursor);
+                }
+                const slice = words.slice(cursor, cursor + Math.max(0, take));
+                cursor += slice.length;
+                return retime(seg, slice.join(' '));
+            });
+        }
+        p.onSegmentsChange?.(next);
+        setView('timed');
+        setPlainApplied(true);
+        setTimeout(() => setPlainApplied(false), 2200);
+    };
+
     // ─── Layout controls ────────────────────────────────────────────────
     // The user can pick how the preview + transcript editor sit
     // relative to each other. Defaults to 'split-equal' (50/50) but
@@ -2693,17 +2825,39 @@ function Phase1Preview(p) {
                                 : (idx) => p.onDeleteSegment?.(idx)}
                         />
                     ) : (
-                        <textarea
-                            value={p.editedTranscript}
-                            onChange={(e) => p.setEditedTranscript(e.target.value)}
-                            rows={10}
-                            className="w-full bg-black/40 border border-white/10 rounded-md p-3 text-[13px] text-white focus:outline-none focus:border-emerald-500/50 resize-y leading-relaxed font-mono"
-                        />
+                        <>
+                            <textarea
+                                value={p.editedTranscript}
+                                onChange={(e) => p.setEditedTranscript(e.target.value)}
+                                rows={10}
+                                className="w-full bg-black/40 border border-white/10 rounded-md p-3 text-[13px] text-white focus:outline-none focus:border-emerald-500/50 resize-y leading-relaxed font-mono"
+                            />
+                            {/* Apply Plain → Timed. Without this, edits/pastes
+                                here never reach the timed track, which is what
+                                actually gets burned. */}
+                            {segCount > 0 && (
+                                <button
+                                    type="button"
+                                    onClick={applyPlainToTimed}
+                                    disabled={!(p.editedTranscript || '').trim()}
+                                    className={'mt-2 inline-flex items-center gap-1.5 px-3 py-1.5 rounded-md border text-[11px] font-bold transition disabled:opacity-40 disabled:cursor-not-allowed '
+                                        + (plainApplied
+                                            ? 'border-emerald-500/60 bg-emerald-500/20 text-emerald-100'
+                                            : 'border-emerald-500/40 bg-emerald-500/10 text-emerald-200 hover:bg-emerald-500/20')}
+                                    title="Push this text onto the timed segments (keeps each segment's timing) — this is what gets burned"
+                                >
+                                    {plainApplied ? <Check size={12} /> : <ArrowRight size={12} />}
+                                    {plainApplied ? 'Applied to timed track' : 'Apply to timed segments →'}
+                                </button>
+                            )}
+                        </>
                     )}
                     <p className="mt-2 text-[11px] text-zinc-500 leading-relaxed">
                         {view === 'timed'
                             ? 'Each line is a timed segment — the video player on the left shows the active one as it plays.'
-                            : 'Edit anything that\'s still wrong before continuing. Your edits will be used for the burned subtitles.'}
+                            : segCount > 0
+                                ? 'Paste or edit your cleaned/translated transcript here, then click "Apply to timed segments" — it maps the text onto the timed track (keeping each segment\'s timing) so it actually gets burned. One line per segment maps exactly; a paragraph is spread across segments by duration.'
+                                : 'Edit anything that\'s still wrong before continuing. Your edits will be used for the burned subtitles.'}
                     </p>
                 </div>
                 )}
@@ -3166,7 +3320,13 @@ function StandaloneLyricsPanel({ jobId, onAligned, llmHeaders, targetLang, scrip
                 // which is what made it look like "nothing happened".
                 headers: {
                     'Content-Type': 'application/json',
-                    ...(llmHeaders || {}),
+                    // Read the LIVE provider choice from localStorage at
+                    // request time (not the stale prop). The in-page
+                    // ProviderPicker persists there but doesn't re-render
+                    // App.jsx, so the `llmHeaders` prop can lag behind the
+                    // picker — which sent requests to Gemini even after the
+                    // user switched to Ollama (→ 429 quota error).
+                    ...buildLlmHeaders(llmHeaders),
                 },
                 body: JSON.stringify({
                     job_id: jobId,
@@ -3392,6 +3552,9 @@ function LiveSubtitleVideo({
     //                       neutral (requires word-level timings)
     animation = 'none',
     highlightColor = '#FFDD00',
+    // Optional video-hook overlay (styling page only). Shape:
+    // {text, position, size, text_color, bg_color, bg_opacity, y_offset}.
+    hook = null,
 }) {
     const localRef = useRef(null);
     // Honour the parent's ref if one was supplied so they can call
@@ -3399,6 +3562,10 @@ function LiveSubtitleVideo({
     // a segment timestamp in the editor list).
     const videoRef = externalVideoRef || localRef;
     const [aspect, setAspect] = useState(9 / 16);
+    // Real frame px dims (from <video> metadata) so the hook preview maps its
+    // px margins against the SAME width/height the burn uses — otherwise a
+    // horizontal project's margins looked wrong against a nominal 1080×1920.
+    const [frameDims, setFrameDims] = useState(null);
     // Active SEGMENT (full object) so we can render its words[] array
     // for word-by-word reveal — not just a flat text string. The
     // segment's words[] each carry start/end timestamps so we can
@@ -3499,20 +3666,28 @@ function LiveSubtitleVideo({
     };
     const handleLoadedMetadata = (e) => {
         const v = e.target;
-        if (v.videoWidth && v.videoHeight) setAspect(v.videoWidth / v.videoHeight);
+        if (v.videoWidth && v.videoHeight) {
+            setAspect(v.videoWidth / v.videoHeight);
+            setFrameDims({ w: v.videoWidth, h: v.videoHeight });
+        }
     };
 
     // Build the same kind of CSS approximation Phase2Styling uses so a
     // single component covers both phases.
     const bw = Math.max(borderWidth, 0);
-    const outlineShadow = bw > 0 ? [
-        `-${bw}px -${bw}px 0 ${borderColor}`,
-        `${bw}px -${bw}px 0 ${borderColor}`,
-        `-${bw}px ${bw}px 0 ${borderColor}`,
-        `${bw}px ${bw}px 0 ${borderColor}`,
-        `0 -${bw}px 0 ${borderColor}`, `0 ${bw}px 0 ${borderColor}`,
-        `-${bw}px 0 0 ${borderColor}`, `${bw}px 0 0 ${borderColor}`,
-    ].join(', ') : 'none';
+    // OUTLINE — use a real vector stroke (`-webkit-text-stroke` + paint-order
+    // stroke→fill) instead of the old 8-direction text-shadow hack, which
+    // rendered jagged / "broken" at the thicker template border widths.
+    // paint-order draws the stroke BEHIND the fill so the letters keep their
+    // full weight and the outline sits cleanly outside. A soft drop shadow
+    // adds separation from busy video backgrounds. This closely matches what
+    // libass produces in the burned mp4.
+    const outlineProps = bw > 0 ? {
+        WebkitTextStrokeWidth: `${bw}px`,
+        WebkitTextStrokeColor: borderColor,
+        paintOrder: 'stroke fill',
+        textShadow: '0 2px 6px rgba(0,0,0,0.45)',
+    } : { textShadow: '0 1px 3px rgba(0,0,0,0.35)' };
     // Compute the preview font-size in container-query units. The
     // backend ASS Fontsize is computed as `slider * video_h / 600`
     // — so the burn renders text at `slider/600` fraction of video
@@ -3536,30 +3711,35 @@ function LiveSubtitleVideo({
     // in CSS so what you see here is what the burn produces.
     const previewFontFamily = resolvePreviewFontFamily(fontFamily);
 
-    // PARITY WITH BURN — overflow shrink. subtitles.py auto-shrinks
-    // fontsize when the longest wrapped line would overflow the frame.
-    // Without mirroring that math here, the preview rendered the user's
-    // PICKED size while the burn shrunk it — preview big, burn small,
-    // exactly what the user reported. We work in fictional 600-tall
-    // video units (matching PREVIEW_REFERENCE_HEIGHT on the backend)
-    // and use the target output frame's width. 'original' orientation
-    // has no crop so we skip the shrink (source-native width is wider
-    // than 9:16 and rarely overflows for typical Whisper segments).
-    const _isCroppedForShrink = outputOrientation && outputOrientation !== 'original';
-    let shrinkRatio = 1.0;
-    if (_isCroppedForShrink) {
-        const burnFontsizePx = Math.round(sliderVal * (1920 / 600));
-        const longest = longestWrappedLineChars(segments);
-        const burnFrameWidth = outputOrientation === 'horizontal'
-            ? Math.round(1920 * (16 / 9))   // ~3413 px — almost never shrinks
-            : Math.round(1920 * (9 / 16));  // 1080 px — common shrink case
-        shrinkRatio = computeSafeShrinkRatio({
-            requestedFontsize: burnFontsizePx,
-            longestLineChars: longest,
-            frameWidthUnits: burnFrameWidth,
-            fontName: previewFontFamily,
-        });
+    // PARITY WITH BURN — TWO-LINE overflow shrink. subtitles.py keeps the
+    // user's chosen size and wraps long captions across up to two lines,
+    // shrinking ONLY when even two lines won't fit. Mirroring that here does
+    // two things: (1) the preview matches the burned mp4, and (2) the font
+    // slider actually changes the rendered size in the normal range — the old
+    // one-line model pinned the size to "largest that fits one line", so the
+    // slider appeared to do nothing (the user's resize bug).
+    //
+    // We mirror the shrink for ALL orientations, INCLUDING 'original': a
+    // native vertical (9:16) source is exactly the case that overflows.
+    const burnFontsizePx = Math.round(sliderVal * (1920 / 600));
+    const longestSeg = longestSegmentChars(segments);
+    let burnFrameWidth;
+    if (outputOrientation === 'horizontal') {
+        burnFrameWidth = Math.round(1920 * (16 / 9));   // ~3413 px — almost never shrinks
+    } else if (outputOrientation === 'vertical') {
+        burnFrameWidth = Math.round(1920 * (9 / 16));   // 1080 px — common shrink case
+    } else {
+        // 'original' (or unset) — use the detected SOURCE aspect so a native
+        // vertical video shrinks just like the burn (1920 × 0.5625 = 1080).
+        burnFrameWidth = Math.round(1920 * (aspect || 9 / 16));
     }
+    const shrinkRatio = computeSafeShrinkRatio({
+        requestedFontsize: burnFontsizePx,
+        charCount: longestSeg,
+        frameWidthUnits: burnFrameWidth,
+        fontName: previewFontFamily,
+        maxLines: 2,
+    });
     const cqhPct = (sliderVal / 6 * shrinkRatio).toFixed(2);
     const previewFontSize = `clamp(11px, ${cqhPct}cqh, 200px)`;
     const overlayStyle = {
@@ -3573,9 +3753,10 @@ function LiveSubtitleVideo({
         textAlign: 'center',
         lineHeight: '1.25',
         ...(bgOpacity > 0 ? {
+            // Box mode — solid background chip, no stroke/shadow on the text.
             backgroundColor: `${bgColor}${Math.round(bgOpacity * 255).toString(16).padStart(2, '0')}`,
             textShadow: 'none',
-        } : { textShadow: outlineShadow }),
+        } : outlineProps),
     };
     // GAP-BLEED FIX: only show fallbackText (the styling-preview sample)
     // BEFORE any playback has happened. Once the video plays, gaps must
@@ -3762,15 +3943,32 @@ function LiveSubtitleVideo({
         );
     }, [imageOverlays, playbackTime]);
 
+    // BOX SIZING — must honour the target aspect ratio. The old
+    // `w-full max-h-[600px]` forced width:100%, which for a PORTRAIT (9:16)
+    // video overrides aspect-ratio: the box rendered full-width and only its
+    // height got clamped to 600px, so the box came out WIDE. object-contain
+    // then letterboxed the vertical video into a narrow centre strip while
+    // the full-width subtitle overlay spilled past the visible frame — the
+    // user's "subtitles go beyond the vertical frame" bug.
+    //
+    // Fix: for a portrait aspect, bound the box by WIDTH (= maxHeight ×
+    // aspect) so aspect-ratio derives the height and the box stays narrow.
+    // Landscape/square keep the width-driven sizing they always had.
+    const _portraitBox = targetAspect < 1;
     return (
         <div
-            className="rounded-xl border border-white/10 bg-black overflow-hidden relative w-full mx-auto max-h-[600px]"
+            className="rounded-xl border border-white/10 bg-black overflow-hidden relative w-full mx-auto"
             // containerType: 'size' makes this element a query container
             // for SIZE-based queries — required for cqh to resolve to a
             // % of THIS element's height. Without it, cqh falls back to
             // the viewport height, which would defeat the whole point.
             style={{
                 aspectRatio: targetAspect, containerType: 'size',
+                ...(_portraitBox
+                    // Cap width at (maxHeight × aspect); aspect-ratio fills the
+                    // height. min(600px, 78vh) keeps it on-screen on laptops.
+                    ? { maxWidth: `calc(min(600px, 78vh) * ${targetAspect})` }
+                    : { maxHeight: 'min(600px, 78vh)' }),
                 outline: dragOver ? '3px dashed #60a5fa' : 'none',
                 outlineOffset: dragOver ? '-6px' : '0',
             }}
@@ -3876,6 +4074,71 @@ function LiveSubtitleVideo({
                     Drop image to add as overlay
                 </div>
             )}
+
+            {/* VIDEO HOOK preview overlay. Sized to EXACTLY match the
+                HookModal editor (where the user designs it): that modal
+                renders S/M/L at 14/18/24px in a 600px-tall reference box,
+                i.e. 2.33 / 3.0 / 4.0 cqh. Using cqh (% of THIS box's height)
+                keeps the hook identical relative to the video in both
+                previews regardless of each box's absolute pixel size — so
+                "Save hook" no longer changes the size. (The old 6×scale cqh
+                rendered ~2× too big here and overflowed the top.) Font /
+                padding / radius / shadow all mirror the modal. */}
+            {hook && (hook.text || '').trim() && (() => {
+                // 2-D anchor placement, mirroring HookModal: px margins mapped
+                // to % of the REAL frame size (so horizontal projects map
+                // correctly), falling back to 1080×1920 until metadata loads.
+                // Legacy position / y_offset still honoured for old hooks.
+                const NOMINAL_W = (frameDims && frameDims.w) || 1080;
+                const NOMINAL_H = (frameDims && frameDims.h) || 1920;
+                const hHA = hook.h_align || 'center';
+                const hMX = typeof hook.margin_x === 'number' ? hook.margin_x : 40;
+                const hMY = typeof hook.margin_y === 'number' ? hook.margin_y : 40;
+                const hookPos = {};
+                if (hHA === 'left') hookPos.left = `${(hMX / NOMINAL_W) * 100}%`;
+                else if (hHA === 'right') hookPos.right = `${(hMX / NOMINAL_W) * 100}%`;
+                else hookPos.left = '50%';
+                let ty = '-50%';
+                if (hook.v_align) {
+                    if (hook.v_align === 'top') { hookPos.top = `${(hMY / NOMINAL_H) * 100}%`; ty = '0'; }
+                    else if (hook.v_align === 'bottom') { hookPos.bottom = `${(hMY / NOMINAL_H) * 100}%`; ty = '0'; }
+                    else { hookPos.top = '50%'; ty = '-50%'; }
+                } else {
+                    const presetY = hook.position === 'center' ? 50 : hook.position === 'bottom' ? 75 : 20;
+                    hookPos.top = `${(typeof hook.y_offset === 'number') ? hook.y_offset : presetY}%`;
+                }
+                hookPos.transform = `translate(${hHA === 'center' ? '-50%' : '0'}, ${ty})`;
+                // Match HookModal.getSizeStyle: S=14px M=18px L=24px over a
+                // 600px-tall reference → cqh percentages below.
+                const hookCqh = hook.size === 'S' ? '2.33' : hook.size === 'L' ? '4.0' : '3.0';
+                const hookMaxW = hook.size === 'S' ? '80%' : hook.size === 'L' ? '95%' : '90%';
+                const bgHex = (hook.bg_color || '#FFFFFF').replace('#', '');
+                const r = parseInt(bgHex.slice(0, 2), 16) || 0;
+                const g = parseInt(bgHex.slice(2, 4), 16) || 0;
+                const b = parseInt(bgHex.slice(4, 6), 16) || 0;
+                const op = typeof hook.bg_opacity === 'number' ? hook.bg_opacity : 0.94;
+                return (
+                    <div className="absolute pointer-events-none"
+                         style={{ ...hookPos, maxWidth: hHA === 'center' ? '90%' : '50%', zIndex: 25 }}>
+                        <div style={{
+                            fontFamily: "'Noto Serif', Georgia, 'Times New Roman', serif",
+                            fontWeight: 'bold',
+                            color: hook.text_color || '#000000',
+                            backgroundColor: `rgba(${r},${g},${b},${op})`,
+                            fontSize: `clamp(9px, ${hookCqh}cqh, 80px)`,
+                            maxWidth: hookMaxW,
+                            textAlign: 'center',
+                            whiteSpace: 'pre-wrap',
+                            borderRadius: 12,
+                            padding: '10px 12px',
+                            boxShadow: '0 4px 15px rgba(0,0,0,0.5)',
+                            lineHeight: 1.2,
+                        }}>
+                            {hook.text}
+                        </div>
+                    </div>
+                );
+            })()}
 
             {/* Smart vertical anchor for multi-line subtitles:
                   • positionPct ≤ 33   → "Top" anchor: positionPct sets
@@ -3998,15 +4261,36 @@ function LiveSubtitleVideo({
                                 />
                             );
                         }
-                        const wordList = activeSegment && Array.isArray(activeSegment.words)
-                            ? activeSegment.words.filter((w) => w && (w.word || '').trim())
-                            : [];
-                        // Decide which animation path to render. Honour
-                        // the `animation` prop if the user picked one.
-                        // For karaoke / word-highlight we NEED word-
-                        // level timings; without them, fall back to the
-                        // pop animation so the user still sees motion.
-                        const wantsPerWord = (animation === 'karaoke' || animation === 'word-highlight');
+                        // Word-level timings drive karaoke / word-highlight.
+                        // The standalone-subtitle backend flattens segments to
+                        // {text,start,end} (no words[]), so without this
+                        // fallback EVERY per-word animation silently degraded
+                        // to a static line — the user's "templates don't
+                        // animate" bug. When real word timings are absent we
+                        // SYNTHESIZE them by distributing the segment's words
+                        // evenly across its [start,end] — exactly what the burn
+                        // pipeline does — so the preview always animates
+                        // word-by-word and matches the burned mp4.
+                        const wordList = (() => {
+                            const real = activeSegment && Array.isArray(activeSegment.words)
+                                ? activeSegment.words.filter((w) => w && (w.word || '').trim())
+                                : [];
+                            if (real.length > 0) return real;
+                            if (!activeSegment) return [];
+                            const toks = String(activeSegment.text || displayText || '')
+                                .trim().split(/\s+/).filter(Boolean);
+                            if (!toks.length) return [];
+                            const s = +activeSegment.start || 0;
+                            const e = Math.max(s + 0.3, +activeSegment.end || (s + 0.3));
+                            const per = (e - s) / toks.length;
+                            return toks.map((tok, i) => ({
+                                word: tok, start: s + i * per, end: s + (i + 1) * per,
+                            }));
+                        })();
+                        // Decide which animation path to render. Honour the
+                        // `animation` prop the user picked. With the synthesis
+                        // above, canDoPerWord is now true whenever there's text.
+                        const wantsPerWord = (animation === 'karaoke' || animation === 'word-highlight' || animation === 'word-box');
                         const canDoPerWord = wantsPerWord && wordList.length > 0;
                         // Pop = full-line scale-in / fade-in each time
                         // a NEW segment becomes active. We key the span
@@ -4061,26 +4345,42 @@ function LiveSubtitleVideo({
                             >
                                 {wordList.map((w, i) => {
                                     const isActive = i === activeWordIdx;
-                                    // KARAOKE: active word + already-passed
-                                    // words colored (sing-along sweep). Future
-                                    // words stay neutral.
-                                    // WORD-HIGHLIGHT: only the active word
-                                    // colored; others stay neutral.
+                                    // KARAOKE: active word + already-passed words
+                                    //   colored (sing-along sweep).
+                                    // WORD-HIGHLIGHT: only the active word colored.
+                                    // WORD-BOX: active word gets a solid box behind
+                                    //   it (highlightColor) instead of recoloring.
+                                    const isWordBox = animation === 'word-box';
                                     let coloredNow = false;
                                     if (animation === 'karaoke') coloredNow = i <= activeWordIdx;
-                                    else coloredNow = isActive; // 'word-highlight'
+                                    else if (animation === 'word-highlight') coloredNow = isActive;
+                                    const wstyle = {
+                                        display: 'inline-block',
+                                        // Pronounced "pop up from the line" on the
+                                        // active word — scale + lift with a springy
+                                        // curve so the spoken word jumps out.
+                                        transform: isActive
+                                            ? (isWordBox ? 'scale(1.12) translateY(-2px)' : 'scale(1.22) translateY(-3px)')
+                                            : 'scale(1)',
+                                        transformOrigin: 'center bottom',
+                                        transition: 'color 100ms ease-out, background-color 100ms ease-out, transform 160ms cubic-bezier(0.34, 1.56, 0.64, 1)',
+                                        willChange: 'transform',
+                                        color: (isWordBox
+                                            ? (overlayStyle.color || fontColor)
+                                            : (coloredNow ? highlightColor : (overlayStyle.color || fontColor))),
+                                    };
+                                    if (isWordBox && isActive) {
+                                        wstyle.backgroundColor = highlightColor;
+                                        wstyle.color = '#FFFFFF';
+                                        wstyle.borderRadius = '0.18em';
+                                        wstyle.padding = '0 0.18em';
+                                        // Drop the outline on the boxed word so the
+                                        // box edge stays crisp.
+                                        wstyle.WebkitTextStrokeWidth = '0px';
+                                    }
                                     return (
                                         <React.Fragment key={i}>
-                                            <span
-                                                style={{
-                                                    color: coloredNow ? highlightColor : (overlayStyle.color || fontColor),
-                                                    display: 'inline-block',
-                                                    transform: isActive ? 'scale(1.08)' : 'scale(1)',
-                                                    transition: 'color 120ms ease-out, transform 120ms ease-out',
-                                                }}
-                                            >
-                                                {w.word}
-                                            </span>
+                                            <span style={wstyle}>{w.word}</span>
                                             {i < wordList.length - 1 ? ' ' : ''}
                                         </React.Fragment>
                                     );
@@ -4418,6 +4718,39 @@ function Phase2Styling(p) {
                     </span>
                 </div>
             )}
+        {/* Video-hook editor (shared with the clip tool). Conditionally
+            rendered so it re-mounts on each open and re-initialises from
+            the current hookConfig. onGenerate stores the config — the
+            actual burn happens server-side on "Burn subtitles". */}
+        {p.showHookModal && (
+            <HookModal
+                isOpen={true}
+                onClose={() => p.setShowHookModal?.(false)}
+                videoUrl={p.videoUrl}
+                initialConfig={p.hookConfig}
+                submitLabel={p.hookConfig?.text ? 'Save hook' : 'Add hook'}
+                isProcessing={false}
+                onGenerate={(cfg) => {
+                    p.setHookConfig?.({
+                        text: (cfg.text || '').trim(),
+                        position: cfg.position || 'top',
+                        size: cfg.size || 'M',
+                        text_color: cfg.text_color || '#000000',
+                        bg_color: cfg.bg_color || '#FFFFFF',
+                        bg_opacity: typeof cfg.bg_opacity === 'number' ? cfg.bg_opacity : 0.94,
+                        y_offset: typeof cfg.y_offset === 'number' ? cfg.y_offset : null,
+                        // 2-D placement — MUST be carried through or the burn
+                        // (and the styling-page preview) silently fall back to
+                        // centre. This drop was why "top-right" never applied.
+                        h_align: cfg.h_align || 'center',
+                        v_align: cfg.v_align || null,
+                        margin_x: typeof cfg.margin_x === 'number' ? cfg.margin_x : 40,
+                        margin_y: typeof cfg.margin_y === 'number' ? cfg.margin_y : 40,
+                    });
+                    p.setShowHookModal?.(false);
+                }}
+            />
+        )}
         <div className="grid grid-cols-1 md:grid-cols-2 gap-5">
             <LiveSubtitleVideo
                 videoUrl={p.videoUrl}
@@ -4438,6 +4771,8 @@ function Phase2Styling(p) {
                 // Animation preview — these mirror the burn pipeline.
                 animation={p.animation}
                 highlightColor={p.highlightColor}
+                // Video hook overlay preview (burned on top server-side).
+                hook={p.hookConfig}
                 // PHASE 2 INTERACTIVE — click subtitle to select, drag
                 // body to reposition, drag bottom-right corner to
                 // resize font, double-click to edit text. Edits flow
@@ -4456,6 +4791,57 @@ function Phase2Styling(p) {
 
             {/* Style controls */}
             <div className="space-y-3 overflow-y-auto custom-scrollbar pr-1 max-h-[600px]">
+                {/* VIDEO HOOK — optional punchy text overlay burned on top
+                    of the finished video. Reuses the same editor + renderer
+                    as the clip tool's viral hook. The config is collected
+                    here and applied server-side after the subtitle burn. */}
+                <div className="rounded-lg border border-amber-500/30 bg-amber-500/[0.06] p-3 space-y-2">
+                    <div className="flex items-center justify-between gap-2">
+                        <div className="text-[10px] uppercase tracking-wider text-amber-300/90 font-bold flex items-center gap-1.5">
+                            <Sparkles size={12} /> Video hook
+                        </div>
+                        {p.hookConfig?.text ? (
+                            <span className="text-[10px] text-emerald-300 font-semibold">● Added</span>
+                        ) : (
+                            <span className="text-[10px] text-zinc-500">Optional</span>
+                        )}
+                    </div>
+                    <p className="text-[11px] text-zinc-400 leading-snug">
+                        Add a scroll-stopping headline on top of your video — same hook editor as the clip tool.
+                    </p>
+                    {p.hookConfig?.text ? (
+                        <>
+                            <div className="rounded-md bg-black/40 border border-white/10 px-2.5 py-1.5 text-[12px] text-white line-clamp-2">
+                                “{p.hookConfig.text}”
+                            </div>
+                            <div className="flex gap-2">
+                                <button
+                                    type="button"
+                                    onClick={() => p.setShowHookModal?.(true)}
+                                    className="flex-1 py-2 rounded-md text-xs font-semibold bg-amber-500/90 hover:bg-amber-400 text-black transition"
+                                >
+                                    Edit hook
+                                </button>
+                                <button
+                                    type="button"
+                                    onClick={() => p.setHookConfig?.(null)}
+                                    className="px-3 py-2 rounded-md text-xs font-semibold bg-white/5 hover:bg-white/10 text-zinc-300 border border-white/10 transition"
+                                >
+                                    Remove
+                                </button>
+                            </div>
+                        </>
+                    ) : (
+                        <button
+                            type="button"
+                            onClick={() => p.setShowHookModal?.(true)}
+                            className="w-full py-2.5 rounded-md text-xs font-bold bg-gradient-to-r from-yellow-500 to-amber-600 hover:from-yellow-400 hover:to-amber-500 text-black transition flex items-center justify-center gap-1.5"
+                        >
+                            <Sparkles size={13} /> Add a hook
+                        </button>
+                    )}
+                </div>
+
                 {/* APPLY SCOPE — toggle between "Apply to all" and
                     "Apply to selected only". When 'all', picking a
                     template overwrites the global styling state (the
